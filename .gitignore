@@ -5,3 +5,5 @@ lattice_store/
 .claude/
 .python-version
 uv.lock
+.env.eval
+results/
