@@ -12,7 +12,7 @@ uv run pytest -k test_supersession_links_atoms  # single test
 uv run lattice-mcp             # run MCP server (requires env vars)
 ```
 
-Required env vars for running the server: `LLM_PROVIDER`, `LLM_MODEL`, `LLM_API_KEY`, `LATTICE_DIR`.
+Required env vars for running the server: `LLM_PROVIDER`, `LLM_MODEL`, `LATTICE_DIR`. `LLM_API_KEY` is required for all providers except `ollama` — `complete()` raises `EnvironmentError` eagerly if missing.
 
 ## Architecture
 
@@ -28,7 +28,6 @@ lattice/
   ingest.py        LLM extracts atoms from raw text, then checks supersession per atom.
   selection.py     BM25 pre-filter (top_k=20) → LLM re-ranks → returns atom dicts.
   synthesis.py     LLM generates prose answer from a list of atom dicts.
-  tools.py         (unused placeholder)
 ```
 
 ### Key data flow details
