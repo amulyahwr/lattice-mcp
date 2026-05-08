@@ -73,8 +73,28 @@ class TestComplete:
     def test_messages_forwarded(self, monkeypatch):
         monkeypatch.setenv("LLM_PROVIDER", "anthropic")
         monkeypatch.setenv("LLM_MODEL", "claude-sonnet-4-6")
+        monkeypatch.setenv("LLM_API_KEY", "sk-test")
         messages = [{"role": "user", "content": "what is 2+2?"}]
         with patch("lattice.llm.litellm.completion", return_value=_make_response("4")) as mock:
             llm_module.complete(messages)
         _, kwargs = mock.call_args
         assert kwargs.get("messages") == messages
+
+    def test_missing_api_key_raises_for_anthropic(self, monkeypatch):
+        monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+        monkeypatch.setenv("LLM_MODEL", "claude-sonnet-4-6")
+        with pytest.raises(EnvironmentError, match="LLM_API_KEY"):
+            llm_module.complete([{"role": "user", "content": "hi"}])
+
+    def test_missing_api_key_raises_for_openai(self, monkeypatch):
+        monkeypatch.setenv("LLM_PROVIDER", "openai")
+        monkeypatch.setenv("LLM_MODEL", "gpt-4o")
+        with pytest.raises(EnvironmentError, match="LLM_API_KEY"):
+            llm_module.complete([{"role": "user", "content": "hi"}])
+
+    def test_missing_api_key_ok_for_ollama(self, monkeypatch):
+        monkeypatch.setenv("LLM_PROVIDER", "ollama")
+        monkeypatch.setenv("LLM_MODEL", "llama3")
+        with patch("lattice.llm.litellm.completion", return_value=_make_response("ok")):
+            result = llm_module.complete([{"role": "user", "content": "hi"}])
+        assert result == "ok"

@@ -4,3 +4,4 @@ lattice/__pycache__/*
 lattice_store/
 .claude/
 .python-version
+uv.lock

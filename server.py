@@ -15,6 +15,7 @@ from lattice.synthesis import synthesize
 
 app = Server("lattice-mcp")
 _db = LatticeDB()
+_db.preload()
 
 
 @app.list_tools()

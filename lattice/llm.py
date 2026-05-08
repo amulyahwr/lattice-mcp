@@ -18,7 +18,10 @@ def _model_string() -> str:
 
 
 def complete(messages: list[dict]) -> str:
+    provider = os.environ.get("LLM_PROVIDER", "anthropic")
     api_key = os.environ.get("LLM_API_KEY")
+    if provider != "ollama" and not api_key:
+        raise EnvironmentError(f"LLM_API_KEY is required for provider '{provider}'")
     response = litellm.completion(
         model=_model_string(),
         messages=messages,
