@@ -871,6 +871,11 @@ dependencies = [
 dev = [
     { name = "pytest" },
 ]
+eval = [
+    { name = "python-dotenv" },
+    { name = "requests" },
+    { name = "tqdm" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -883,6 +888,11 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [{ name = "pytest", specifier = ">=8" }]
+eval = [
+    { name = "python-dotenv", specifier = ">=1.0" },
+    { name = "requests", specifier = ">=2.0" },
+    { name = "tqdm", specifier = ">=4.0" },
+]
 
 [[package]]
 name = "litellm"
