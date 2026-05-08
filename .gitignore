@@ -1,0 +1,4 @@
+lattice/__pycache__/
+.venv/
+*.pyc
+lattice_store/
