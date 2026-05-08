@@ -4,23 +4,39 @@ import json
 import re
 from datetime import date
 
-from lattice.db import LatticeDB
+from lattice.db import LatticeDB, _query_words
 from lattice.llm import complete
 from lattice.models import Atom
 
 _SYSTEM = """\
-You are a relevance filter. Given a user query and a list of knowledge atoms, return only the atom_ids that are genuinely relevant to answering the query.
+You are a knowledge retrieval agent. Given a query and a list of knowledge atoms, \
+return the atom_ids that are relevant to answering the query.
 
-Rules:
-- Include an atom if it directly answers, supports, or provides useful context for the query.
-- Exclude atoms that are only tangentially related or clearly off-topic.
-- Preserve the ranking: most relevant first.
-- Return a JSON array of atom_id strings only. No markdown fences. No explanation.
+Strategy — cover at least 3 distinct angles before concluding nothing is relevant:
+  Angle 1 — Exact terms: look for atoms containing the key nouns and verbs from the query.
+  Angle 2 — Synonyms and related concepts: consider alternate phrasings
+             (e.g. "car" → "vehicle", "drive"; "phone" → "mobile", "device").
+  Angle 3 — Topic browse: scan subjects for anything that could be related.
+  Angle 4 (if still sparse) — err toward inclusion; synthesis handles filtering.
+
+Additional rules:
+- Include ALL atom_ids that directly answer, support, or provide useful context.
+- For temporal questions ("after X", "before Y", "first", "last"):
+    Find the anchor event and include BOTH the anchor atom and the answer atom.
+- Err heavily on the side of inclusion. Synthesis handles final filtering and reasoning.
+- Preserve ranking: most relevant first.
+
+Return a JSON array of atom_id strings only. No markdown fences. No explanation.
 """
 
 
 def _atom_to_text(a: Atom) -> str:
-    return f"[{a.atom_id}] subject={a.subject!r} kind={a.kind!r}\n{a.content}"
+    vf = a.valid_from.isoformat() if a.valid_from else "null"
+    vu = a.valid_until.isoformat() if a.valid_until else "null"
+    return (
+        f"[{a.atom_id}] subject={a.subject!r} kind={a.kind!r} "
+        f"valid_from={vf} valid_until={vu}\n{a.content}"
+    )
 
 
 def select(
@@ -51,7 +67,6 @@ def select(
     try:
         ranked_ids: list[str] = json.loads(raw)
     except json.JSONDecodeError:
-        # Fall back to BM25 order if LLM returns garbage
         ranked_ids = [a.atom_id for a in candidates]
 
     id_to_atom = {a.atom_id: a for a in candidates}

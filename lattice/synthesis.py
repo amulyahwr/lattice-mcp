@@ -3,13 +3,22 @@ from __future__ import annotations
 from lattice.llm import complete
 
 _SYSTEM = """\
-You are a precise, concise assistant. Answer the user's query using only the knowledge atoms provided.
+You are a knowledge synthesis agent. Given a set of knowledge atoms and a question, produce a concise answer.
 
-Rules:
-- Base your answer strictly on the atoms given. Do not hallucinate facts.
-- If the atoms do not contain enough information to answer, say so clearly.
-- Write in clear, flowing prose. Do not reference atom IDs or internal structure.
-- Be concise: one to three paragraphs at most.
+Workflow:
+1. Consider temporal ordering carefully:
+   - `valid_from` is the date the atom was recorded, not necessarily when the event occurred.
+     Use it to resolve relative time expressions in the atom content.
+   - When content says "last Saturday", "two months ago", "yesterday", etc.,
+     compute the actual event date by offsetting from that atom's valid_from.
+   - For conflicting facts about the same subject, the atom with the later valid_from
+     is more recent and takes precedence.
+   - For event ordering questions, compare resolved event dates, not valid_from dates.
+   - For duration questions ("how long had I been X when Y happened"), compute days between
+     the two resolved event dates.
+2. Base your answer strictly on the atoms — do not hallucinate or add outside knowledge.
+3. If the answer is not present in the atoms, say so clearly.
+4. Be concise: one to three paragraphs at most.
 """
 
 
@@ -18,7 +27,8 @@ def synthesize(query: str, atoms: list[dict]) -> str:
         return "No relevant information found in the lattice."
 
     atoms_text = "\n\n".join(
-        f"[{a['subject']} / {a['kind']}]\n{a['content']}" for a in atoms
+        f"[{a['subject']} / {a['kind']} / valid_from={a.get('valid_from', 'null')}]\n{a['content']}"
+        for a in atoms
     )
     messages = [
         {"role": "system", "content": _SYSTEM},
