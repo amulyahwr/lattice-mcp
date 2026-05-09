@@ -23,11 +23,11 @@ def db(tmp_path):
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 def _ingest_response(atoms: list[dict]) -> str:
-    return json.dumps(atoms)
+    return json.dumps({"atoms": atoms})
 
 
 def _select_response(atom_ids: list[str]) -> str:
-    return json.dumps(atom_ids)
+    return json.dumps({"atom_ids": atom_ids})
 
 
 # ── ingest ────────────────────────────────────────────────────────────────────
@@ -177,18 +177,29 @@ class TestSelect:
 class TestSynthesize:
     def test_returns_string(self):
         atoms = [{"subject": "Python", "kind": "fact", "content": "Python is dynamically typed."}]
-        with patch("lattice.synthesis.complete", return_value="Python is dynamically typed."):
+        with patch("lattice.synthesis.complete", return_value=json.dumps({"answer": "Python is dynamically typed."})):
             result = synthesize("What is Python?", atoms)
-        assert isinstance(result, str)
-        assert len(result) > 0
+        assert isinstance(result.answer, str)
+        assert len(result.answer) > 0
 
     def test_empty_atoms_returns_no_info_message(self):
         result = synthesize("What is Python?", [])
-        assert "no relevant" in result.lower() or "not found" in result.lower() or "no" in result.lower()
+        assert "no relevant" in result.answer.lower() or "not found" in result.answer.lower() or "no" in result.answer.lower()
+
+    def test_empty_atoms_has_empty_raw_response(self):
+        result = synthesize("What is Python?", [])
+        assert result.raw_response == ""
+
+    def test_raw_response_captured(self):
+        raw = json.dumps({"answer": "Python is dynamically typed."})
+        atoms = [{"subject": "Python", "kind": "fact", "content": "Python is dynamically typed."}]
+        with patch("lattice.synthesis.complete", return_value=raw):
+            result = synthesize("What is Python?", atoms)
+        assert result.raw_response == raw
 
     def test_passes_query_and_atoms_to_llm(self):
         atoms = [{"subject": "X", "kind": "fact", "content": "X is true."}]
-        with patch("lattice.synthesis.complete", return_value="X is true.") as mock:
+        with patch("lattice.synthesis.complete", return_value=json.dumps({"answer": "X is true."})) as mock:
             synthesize("Tell me about X.", atoms)
         call_messages = mock.call_args[0][0]
         combined = " ".join(m["content"] for m in call_messages)

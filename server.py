@@ -135,8 +135,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         else:
             atoms = select(query=arguments["query"], as_of=as_of, db=_db)
 
-        answer = synthesize(query=arguments["query"], atoms=atoms)
-        return [TextContent(type="text", text=answer)]
+        result = synthesize(query=arguments["query"], atoms=atoms)
+        return [TextContent(type="text", text=result.answer)]
 
     raise ValueError(f"Unknown tool: {name}")
 

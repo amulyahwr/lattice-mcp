@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import json
-import re
 from datetime import date
+
+from pydantic import BaseModel
 
 from lattice.db import LatticeDB, _query_words
 from lattice.llm import complete
 from lattice.models import Atom
+
+
+class _Selection(BaseModel):
+    atom_ids: list[str]
+
 
 _SYSTEM = """\
 You are a knowledge retrieval agent. Given a query and a list of knowledge atoms, \
@@ -26,7 +32,7 @@ Additional rules:
 - Err heavily on the side of inclusion. Synthesis handles final filtering and reasoning.
 - Preserve ranking: most relevant first.
 
-Return a JSON array of atom_id strings only. No markdown fences. No explanation.
+Return a JSON object with an `atom_ids` key containing an array of atom_id strings, ranked most-relevant first.
 """
 
 
@@ -60,13 +66,10 @@ def select(
             "content": f"Query: {query}\n\nAtoms:\n{candidates_text}",
         },
     ]
-    raw = complete(messages)
-    raw = re.sub(r"^```[a-z]*\n?", "", raw.strip())
-    raw = re.sub(r"\n?```$", "", raw.strip())
-
+    raw = complete(messages, text_format=_Selection)
     try:
-        ranked_ids: list[str] = json.loads(raw)
-    except json.JSONDecodeError:
+        ranked_ids: list[str] = json.loads(raw)["atom_ids"]
+    except (json.JSONDecodeError, KeyError):
         ranked_ids = [a.atom_id for a in candidates]
 
     id_to_atom = {a.atom_id: a for a in candidates}
