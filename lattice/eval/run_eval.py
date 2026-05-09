@@ -25,6 +25,7 @@ from collections import Counter
 from datetime import date
 from pathlib import Path
 
+import mlflow
 import requests
 from dotenv import load_dotenv
 from tqdm import tqdm
@@ -37,22 +38,30 @@ from lattice.synthesis import synthesize
 
 # ── config ────────────────────────────────────────────────────────────────────
 
+_DATA_DIR = Path(__file__).parent / "data"
+_DEFAULT_DATASET = str(_DATA_DIR / "longmemeval_oracle.json")
+
+
+def _default_out(model: str) -> str:
+    slug = model.replace(":", "").replace("/", "_")
+    return f"results/{slug}_baseline.jsonl"
+
+
 def _load_config(args: argparse.Namespace) -> dict:
     load_dotenv(".env.eval", override=False)
+    model = os.environ.get("LLM_MODEL", "gemma4:26b")
     cfg = {
-        "dataset":      args.dataset  or os.environ.get("DATASET", ""),
-        "out":          args.out       or os.environ.get("OUT", "results/run.jsonl"),
+        "dataset":      args.dataset  or os.environ.get("DATASET", _DEFAULT_DATASET),
+        "out":          args.out       or os.environ.get("OUT", _default_out(model)),
         "stratify":     args.stratify  or int(os.environ.get("STRATIFY", "100")),
         "seed":         args.seed      or int(os.environ.get("SEED", "42")),
         "llm_provider": os.environ.get("LLM_PROVIDER", "ollama"),
-        "llm_model":    os.environ.get("LLM_MODEL", "gemma4:26b"),
+        "llm_model":    model,
         "judge_model":  os.environ.get("JUDGE_MODEL", "qwen2.5:14b"),
         "litellm_port": int(os.environ.get("LITELLM_PORT", "4000")),
         "evaluate_script": args.evaluate_script or os.environ.get("EVALUATE_SCRIPT", ""),
         "print_script":    args.print_script    or os.environ.get("PRINT_SCRIPT", ""),
     }
-    if not cfg["dataset"]:
-        sys.exit("ERROR: DATASET not set. Add it to .env.eval or pass --dataset.")
     return cfg
 
 
@@ -111,6 +120,12 @@ def _run_inference(cfg: dict) -> None:
     os.environ["LLM_PROVIDER"] = cfg["llm_provider"]
     os.environ["LLM_MODEL"] = cfg["llm_model"]
 
+    mlflow.litellm.autolog()
+    mlflow.set_experiment(Path(cfg["out"]).stem)
+    tracking_uri = os.environ.get("MLFLOW_TRACKING_URI", "")
+    if tracking_uri:
+        mlflow.set_tracking_uri(tracking_uri)
+
     print(f"Loading dataset: {cfg['dataset']}")
     with open(cfg["dataset"]) as f:
         data = json.load(f)
@@ -142,58 +157,67 @@ def _run_inference(cfg: dict) -> None:
 
             tmpdir = tempfile.mkdtemp(prefix="lattice-eval-")
             try:
-                db = LatticeDB(lattice_dir=tmpdir)
+                with mlflow.start_run(
+                    run_name=qid,
+                    tags={
+                        "question_type": qtype,
+                        "model": cfg["llm_model"],
+                        "provider": cfg["llm_provider"],
+                    },
+                ):
+                    db = LatticeDB(lattice_dir=tmpdir)
 
-                sessions = item.get("haystack_sessions", [])
-                session_ids = item.get("haystack_session_ids", [f"s{i}" for i in range(len(sessions))])
-                dates = item.get("haystack_dates", ["" for _ in sessions])
+                    sessions = item.get("haystack_sessions", [])
+                    session_ids = item.get("haystack_session_ids", [f"s{i}" for i in range(len(sessions))])
+                    dates = item.get("haystack_dates", ["" for _ in sessions])
 
-                atoms_created = 0
-                all_atoms: list[dict] = []
+                    atoms_created = 0
+                    all_atoms: list[dict] = []
 
-                for session, sid, ts in zip(sessions, session_ids, dates):
-                    text = format_session(session, sid, ts)
-                    result = ingest(
-                        text,
-                        metadata={"source": "conversation", "date": ts},
-                        db=db,
-                    )
-                    atoms_created += result["atoms_created"]
+                    for session, sid, ts in zip(sessions, session_ids, dates):
+                        text = format_session(session, sid, ts)
+                        ingest_result = ingest(
+                            text,
+                            metadata={"source": "conversation", "date": ts},
+                            db=db,
+                        )
+                        atoms_created += ingest_result["atoms_created"]
 
-                question_date_str: str | None = item.get("question_date")
-                as_of: date | None = None
-                if question_date_str:
-                    try:
-                        as_of = date.fromisoformat(question_date_str[:10])
-                    except ValueError:
-                        pass
+                    question_date_str: str | None = item.get("question_date")
+                    as_of: date | None = None
+                    if question_date_str:
+                        try:
+                            as_of = date.fromisoformat(question_date_str[:10])
+                        except ValueError:
+                            pass
 
-                selected = select(item["question"], as_of=as_of, db=db)
-                hypothesis = synthesize(item["question"], selected)
+                    selected = select(item["question"], as_of=as_of, db=db)
+                    synthesis = synthesize(item["question"], selected)
 
-                # collect atom details for debug log
-                all_atoms = [
-                    {"atom_id": a.atom_id, "subject": a.subject, "content": a.content[:120]}
-                    for a in db.all()
-                ]
+                    # collect atom details for debug log
+                    all_atoms = [
+                        {"atom_id": a.atom_id, "subject": a.subject, "content": a.content[:120]}
+                        for a in db.all()
+                    ]
 
-                out_f.write(json.dumps({"question_id": qid, "hypothesis": hypothesis}) + "\n")
-                out_f.flush()
+                    out_f.write(json.dumps({"question_id": qid, "hypothesis": synthesis.answer}) + "\n")
+                    out_f.flush()
 
-                dbg_f.write(json.dumps({
-                    "question_id": qid,
-                    "question_type": qtype,
-                    "sessions_ingested": len(sessions),
-                    "atoms_created": atoms_created,
-                    "atoms": all_atoms,
-                    "atoms_selected": [a["atom_id"] for a in selected],
-                    "hypothesis": hypothesis,
-                }) + "\n")
-                dbg_f.flush()
+                    dbg_f.write(json.dumps({
+                        "question_id": qid,
+                        "question_type": qtype,
+                        "sessions_ingested": len(sessions),
+                        "atoms_created": atoms_created,
+                        "atoms": all_atoms,
+                        "atoms_selected": [a["atom_id"] for a in selected],
+                        "synthesis_raw": synthesis.raw_response,
+                        "hypothesis": synthesis.answer,
+                    }) + "\n")
+                    dbg_f.flush()
 
-                atoms_created_total += atoms_created
-                atoms_selected_total += len(selected)
-                n_done += 1
+                    atoms_created_total += atoms_created
+                    atoms_selected_total += len(selected)
+                    n_done += 1
 
             except Exception as exc:
                 out_f.write(json.dumps({"question_id": qid, "hypothesis": f"ERROR: {exc}"}) + "\n")

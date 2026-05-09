@@ -24,6 +24,7 @@ packages = ["lattice", "server.py"]
 [dependency-groups]
 dev = ["pytest>=8"]
 eval = [
+    "mlflow>=2.0",
     "python-dotenv>=1.0",
     "tqdm>=4.0",
     "requests>=2.0",
