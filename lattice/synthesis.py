@@ -1,6 +1,22 @@
 from __future__ import annotations
 
+import json
+from dataclasses import dataclass
+
+from pydantic import BaseModel
+
 from lattice.llm import complete
+
+
+class _Answer(BaseModel):
+    answer: str
+
+
+@dataclass
+class SynthesisResult:
+    answer: str
+    raw_response: str
+
 
 _SYSTEM = """\
 You are a knowledge synthesis agent. Given a set of knowledge atoms and a question, produce a concise answer.
@@ -22,9 +38,12 @@ Workflow:
 """
 
 
-def synthesize(query: str, atoms: list[dict]) -> str:
+def synthesize(query: str, atoms: list[dict]) -> SynthesisResult:
     if not atoms:
-        return "No relevant information found in the lattice."
+        return SynthesisResult(
+            answer="No relevant information found in the lattice.",
+            raw_response="",
+        )
 
     atoms_text = "\n\n".join(
         f"[{a['subject']} / {a['kind']} / valid_from={a.get('valid_from', 'null')}]\n{a['content']}"
@@ -37,4 +56,9 @@ def synthesize(query: str, atoms: list[dict]) -> str:
             "content": f"Query: {query}\n\nKnowledge atoms:\n{atoms_text}",
         },
     ]
-    return complete(messages)
+    raw = complete(messages, text_format=_Answer)
+    try:
+        answer = json.loads(raw)["answer"]
+    except (json.JSONDecodeError, KeyError):
+        answer = raw
+    return SynthesisResult(answer=answer, raw_response=raw)

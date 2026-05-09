@@ -3,11 +3,27 @@ from __future__ import annotations
 import json
 import re
 from datetime import date, datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Optional
+
+from pydantic import BaseModel
 
 from lattice.db import LatticeDB
 from lattice.llm import complete
 from lattice.models import Atom
+
+
+class _ExtractedAtom(BaseModel):
+    subject: str
+    kind: str
+    source: str
+    content: str
+    valid_from: Optional[str] = None
+    valid_until: Optional[str] = None
+
+
+class _AtomList(BaseModel):
+    atoms: list[_ExtractedAtom]
+
 
 _SYSTEM = """\
 You are a knowledge extraction agent. Read a piece of text and extract all durable facts, \
@@ -31,10 +47,8 @@ or "auth system". Consistent subjects enable supersession when the same fact is 
   - Resolve relative dates (e.g. "last Tuesday", "next month") to ISO 8601 (YYYY-MM-DD) using today's date.
   - Do NOT extract generic advice or universally-applicable facts that apply to everyone.
 
-Return a JSON array of objects. Each object must have exactly these keys:
-  subject, kind, source, content, valid_from, valid_until
-
-No other keys. No markdown fences. Just raw JSON array.
+Return a JSON object with an `atoms` key containing an array of atom objects. \
+Each atom must have exactly these keys: subject, kind, source, content, valid_from, valid_until.
 """
 
 # ── date resolution ───────────────────────────────────────────────────────────
@@ -106,10 +120,8 @@ def _extract_atoms(text: str, metadata: dict, ref: datetime) -> list[dict]:
             "content": f"Today's date: {ref.date().isoformat()}\n\n---\n\n{text}",
         },
     ]
-    raw = complete(messages)
-    raw = re.sub(r"^```[a-z]*\n?", "", raw.strip())
-    raw = re.sub(r"\n?```$", "", raw.strip())
-    atoms_data: list[dict] = json.loads(raw)
+    raw = complete(messages, text_format=_AtomList)
+    atoms_data: list[dict] = json.loads(raw)["atoms"]
 
     source_override = metadata.get("source")
     for a in atoms_data:
