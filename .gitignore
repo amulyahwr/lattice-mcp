@@ -8,3 +8,6 @@ uv.lock
 .env.eval
 results/
 lattice/eval/data/*
+*.log
+mlruns/*
+*.db

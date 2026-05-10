@@ -177,7 +177,7 @@ class TestSelect:
 class TestSynthesize:
     def test_returns_string(self):
         atoms = [{"subject": "Python", "kind": "fact", "content": "Python is dynamically typed."}]
-        with patch("lattice.synthesis.complete", return_value=json.dumps({"answer": "Python is dynamically typed."})):
+        with patch("lattice.synthesis.complete", return_value=json.dumps({"thinking": "The atom states Python is dynamically typed.", "answer": "Python is dynamically typed."})):
             result = synthesize("What is Python?", atoms)
         assert isinstance(result.answer, str)
         assert len(result.answer) > 0
@@ -191,7 +191,7 @@ class TestSynthesize:
         assert result.raw_response == ""
 
     def test_raw_response_captured(self):
-        raw = json.dumps({"answer": "Python is dynamically typed."})
+        raw = json.dumps({"thinking": "The atom states Python is dynamically typed.", "answer": "Python is dynamically typed."})
         atoms = [{"subject": "Python", "kind": "fact", "content": "Python is dynamically typed."}]
         with patch("lattice.synthesis.complete", return_value=raw):
             result = synthesize("What is Python?", atoms)
@@ -199,7 +199,7 @@ class TestSynthesize:
 
     def test_passes_query_and_atoms_to_llm(self):
         atoms = [{"subject": "X", "kind": "fact", "content": "X is true."}]
-        with patch("lattice.synthesis.complete", return_value=json.dumps({"answer": "X is true."})) as mock:
+        with patch("lattice.synthesis.complete", return_value=json.dumps({"thinking": "Atom says X is true.", "answer": "X is true."})) as mock:
             synthesize("Tell me about X.", atoms)
         call_messages = mock.call_args[0][0]
         combined = " ".join(m["content"] for m in call_messages)
