@@ -14,9 +14,9 @@ Methodology: implement one priority → full 100q eval → measure delta → dec
 | Priority | File(s) | Change | Est. ROI |
 |----------|---------|--------|----------|
 | P1 ✅ | `synthesis.py` | Add `thinking: str` field to `_Answer` (CoT before answer); strengthen no-info prompt rule | Done — +8.8pp |
-| P2 | `ingest.py` | **Date injection**: prepend session date into atom `content` as "On {date}: ..." — 100% of p1 atoms had null valid_from, root cause of all 26 temporal failures · 5 lines · re-ingest needed | Very High — fixes root cause of 26% of questions with near-zero code |
-| P3 | `selection.py` | **Question-type-aware selection prompt**: detect temporal/multi-session signals in query and inject type-specific instructions ("prioritise atoms with explicit dates", "look across distinct time periods") — prompt-only, zero infra, targets 53/100 worst failures | High — zero cost, directly targets the two worst categories |
-| P4 | `selection.py` | **HyDE**: generate a hypothetical answer atom before BM25 search to bridge query↔atom vocabulary gap | High — 1 LLM call, no infra, helps all question types |
+| P2 ✅ | `ingest.py` | **Date injection**: prepend session date into atom `content` as "On {date}: ..." — 100% of p1 atoms had null valid_from, root cause of all 26 temporal failures · 5 lines · re-ingest needed | Very High — fixes root cause of 26% of questions with near-zero code |
+| P3 ✅ | `selection.py` | **Question-type-aware selection prompt**: detect temporal/multi-session signals in query and inject type-specific instructions ("prioritise atoms with explicit dates", "look across distinct time periods") — prompt-only, zero infra, targets 53/100 worst failures | High — zero cost, directly targets the two worst categories |
+| P4 ✅ | `selection.py` | **HyDE**: generate a hypothetical answer atom before BM25 search to bridge query↔atom vocabulary gap | High — 1 LLM call, no infra, helps all question types |
 | P5 | `llm.py`, `selection.py` | Extend `complete()` with `tools/tool_choice/reasoning`; replace bulk JSON selection with `include_atom(atom_id, reason)` tool calls + zero-selection fallback (top-5 BM25 if 0 selected) | High — eliminates 20% silent 0-atom selection failures |
 | P6 | `ingest.py`, `db.py` | **Atom deduplication**: before writing, BM25-score new atom against existing atoms on same subject; if similarity > threshold, merge instead of creating duplicate — eliminates ~10% near-duplicate noise that wastes selection budget | Medium-High — cleaner atom store benefits all retrieval methods |
 | P7 | `selection.py` | **Multi-pass retrieval**: seed second BM25 pass with first-round atom content; second LLM selection call knows what's already found and looks for what's missing (opt-in via `SELECT_PASSES=2`) | Medium-High for multi-session (30% selection failure vs 20% overall) · needs P5 infra |
@@ -31,9 +31,9 @@ Methodology: implement one priority → full 100q eval → measure delta → dec
 |-----|----------|----------|-------|
 | baseline | — | 15.0% | gemma4:e4b · qwen3.5:4b judge · 100q oracle |
 | p1 | Synthesis CoT | 23.8% | task-avg 25.2% · multi-session 22.2% · temporal 7.4% |
-| p2 | Date injection into atom content | — | |
-| p3 | Question-type-aware selection | — | |
-| p4 | HyDE expansion | — | |
+| p2 | Date injection into atom content | 19.0% | task-avg 23.1% · multi-session 3.7% · temporal 0.0% · regression vs p1 — reverted |
+| p3 | Question-type-aware selection (temporal-only) | 18.0% | task-avg 20.1% · temporal 0.0% · regression vs p1 — reverted |
+| p4 | HyDE expansion | skipped | BM25 + hallucinated vocab = wrong atom retrieval; HyDE suited for dense/embedding retrieval only |
 | p5 | Selection tool calling + fallback | — | |
 | p6 | Atom deduplication | — | |
 | p7 | Multi-pass retrieval | — | |
@@ -41,3 +41,17 @@ Methodology: implement one priority → full 100q eval → measure delta → dec
 | p9 | Uncertainty re-retrieval | — | |
 | p10 | Semantic embeddings | — | |
 | p11 | Ingest tool calling | — | |
+
+## Per-category tracker
+
+| Category | baseline | p1 | p2 | p3 |
+|---|---|---|---|---|
+| **overall** | 15.0% | 23.8% | 19.0% | 18.0% |
+| **task-avg** | — | 25.2% | 23.1% | 20.1% |
+| single-session-user | — | 35.7% | 42.9% | 35.7% |
+| single-session-preference | — | 0.0% | 0.0% | 0.0% |
+| single-session-assistant | — | 54.5% | 54.5% | 36.4% |
+| multi-session | — | 22.2% | 3.7% | 11.1% |
+| temporal-reasoning | — | 7.4% | 0.0% | 0.0% |
+| knowledge-update | — | 31.3% | 37.5% | 37.5% |
+| abstention | — | 28.6% | 0.0% | 28.6% |
