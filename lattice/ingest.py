@@ -147,7 +147,15 @@ def _parse_datetime(val: Any) -> datetime | None:
             d = date.fromisoformat(text[:10])
             return datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
         except ValueError:
-            return None
+            pass
+
+    for fmt in ("%Y/%m/%d (%a) %H:%M", "%Y/%m/%d %H:%M", "%Y/%m/%d"):
+        try:
+            dt = datetime.strptime(text, fmt)
+            return dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            pass
+    return None
 
 
 def _parse_date(val: Any) -> date | None:

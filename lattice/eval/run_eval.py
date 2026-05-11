@@ -7,6 +7,9 @@ Usage:
     python -m lattice.eval.run_eval --phase judge               # judge only (needs results file)
     python -m lattice.eval.run_eval --stratify 10               # quick smoke test (10 questions)
     python -m lattice.eval.run_eval --out results/myrun.jsonl   # custom output path
+    python -m lattice.eval.run_eval --keep-lattice-dirs         # keep per-question atom dirs
+    python -m lattice.eval.run_eval --retrieval-mode bm25       # bypass LLM selection
+    python -m lattice.eval.run_eval --retrieval-mode all        # bypass retrieval; synthesize over all atoms
 
     # stdout + stderr are tee'd to a log file automatically:
     python -m lattice.eval.run_eval --phase inference
@@ -20,13 +23,16 @@ Usage:
     # e.g.: results/gemma4e4b_qwen2514b_longmemeval_oracle_inference.jsonl
 
     # Debug viewer — browse results by question, failure mode, atoms:
-    uv run streamlit run lattice/eval/debug_viewer.py
+    uv run --group eval streamlit run lattice/eval/debug_viewer.py
 
 Defaults (overridable via CLI flags or env vars in .env.eval):
     dataset  : lattice/eval/data/longmemeval_oracle.json
     out      : results/<model-slug>_baseline.jsonl  (auto-derived from LLM_MODEL)
     stratify : 100 questions, stratified by question_type
     seed     : 42
+    retrieval: select; set RETRIEVAL_MODE=select|bm25|all
+    top_k    : 20; set TOP_K or --top-k
+    keep dirs: false; set KEEP_LATTICE_EVAL_DIRS=1 or --keep-lattice-dirs
 
 Required env vars (set in .env.eval): LLM_PROVIDER, LLM_MODEL, LLM_API_KEY (non-ollama).
 """
@@ -76,23 +82,32 @@ def _logs_dir(priority: str) -> str:
     return f"logs/{priority}" if priority else "logs"
 
 
-def _default_out(llm_model: str, dataset: str, priority: str) -> str:
+def _default_out(
+    llm_model: str, dataset: str, priority: str, retrieval_mode: str = "select"
+) -> str:
     """Inference output path. Always named by llm_slug only — judge slug appears in eval-results filename."""
     ds = Path(dataset).stem
-    return f"{_results_dir(priority)}/{_slug(llm_model)}_{ds}_inference.jsonl"
+    suffix = "_inference" if retrieval_mode == "select" else f"_{retrieval_mode}_inference"
+    return f"{_results_dir(priority)}/{_slug(llm_model)}_{ds}{suffix}.jsonl"
 
 
 def _default_log(
-    llm_model: str, judge_model: str, dataset: str, phase: str, priority: str
+    llm_model: str,
+    judge_model: str,
+    dataset: str,
+    phase: str,
+    priority: str,
+    retrieval_mode: str = "select",
 ) -> str:
     ds = Path(dataset).stem
     base = _logs_dir(priority)
+    mode = "" if retrieval_mode == "select" else f"_{retrieval_mode}"
     if phase == "inference":
-        name = f"run_{_slug(llm_model)}_{ds}_inference.log"
+        name = f"run_{_slug(llm_model)}_{ds}{mode}_inference.log"
     elif phase == "judge":
-        name = f"run_{_slug(judge_model)}_{ds}_judge.log"
+        name = f"run_{_slug(judge_model)}_{ds}{mode}_judge.log"
     else:
-        name = f"run_{_slug(llm_model)}_{_slug(judge_model)}_{ds}_all.log"
+        name = f"run_{_slug(llm_model)}_{_slug(judge_model)}_{ds}{mode}_all.log"
     return f"{base}/{name}"
 
 
@@ -116,20 +131,27 @@ class _Tee:
 
 def _load_config(args: argparse.Namespace) -> dict:
     load_dotenv(".env.eval", override=False)
-    model = os.environ.get("LLM_MODEL", "gemma4:e4b")
-    judge = os.environ.get("JUDGE_MODEL", "qwen3.5:14b")
+    model = os.environ.get("LLM_MODEL", "gemma4:e2b")
+    judge = os.environ.get("JUDGE_MODEL", "qwen3.5:4b")
     dataset = args.dataset or os.environ.get("DATASET", _DEFAULT_DATASET)
     phase = args.phase
     priority = args.priority or os.environ.get("PRIORITY", "")
+    retrieval_mode = args.retrieval_mode or os.environ.get("RETRIEVAL_MODE", "select")
+    if retrieval_mode not in {"select", "bm25", "all"}:
+        raise ValueError("RETRIEVAL_MODE must be one of: select, bm25, all")
     cfg = {
         "dataset": dataset,
         "out": args.out
-        or os.environ.get("OUT", _default_out(model, dataset, priority)),
+        or os.environ.get("OUT", _default_out(model, dataset, priority, retrieval_mode)),
         "log": args.log
-        or os.environ.get("LOG", _default_log(model, judge, dataset, phase, priority)),
+        or os.environ.get(
+            "LOG", _default_log(model, judge, dataset, phase, priority, retrieval_mode)
+        ),
         "priority": priority,
         "stratify": args.stratify or int(os.environ.get("STRATIFY", "100")),
         "seed": args.seed or int(os.environ.get("SEED", "42")),
+        "retrieval_mode": retrieval_mode,
+        "top_k": args.top_k or int(os.environ.get("TOP_K", "20")),
         "llm_provider": os.environ.get("LLM_PROVIDER", "ollama"),
         "llm_model": model,
         "judge_model": judge,
@@ -140,6 +162,8 @@ def _load_config(args: argparse.Namespace) -> dict:
         or os.environ.get("PRINT_QA_SCRIPT", ""),
         "print_retrieval_script": args.print_retrieval_script
         or os.environ.get("PRINT_RETRIEVAL_SCRIPT", ""),
+        "keep_lattice_dirs": args.keep_lattice_dirs
+        or os.environ.get("KEEP_LATTICE_EVAL_DIRS", "").lower() in {"1", "true", "yes"},
     }
     return cfg
 
@@ -197,10 +221,53 @@ def _load_done_ids(out_path: Path) -> set[str]:
 # ── inference phase ───────────────────────────────────────────────────────────
 
 
+def _atom_debug_dict(atom, preview_chars: int | None = None) -> dict:
+    content = atom.content if preview_chars is None else atom.content[:preview_chars]
+    return {
+        "atom_id": atom.atom_id,
+        "subject": atom.subject,
+        "kind": atom.kind,
+        "source": atom.source,
+        "content": content,
+        "valid_from": atom.valid_from.isoformat() if atom.valid_from else None,
+        "valid_until": atom.valid_until.isoformat() if atom.valid_until else None,
+        "is_superseded": atom.is_superseded,
+        "supersedes": atom.supersedes,
+        "superseded_by": atom.superseded_by,
+        "provenance": {
+            "source_id": atom.source_id,
+            "source_title": atom.source_title,
+            "source_type": atom.source_type,
+            "session_id": atom.session_id,
+            "segment_id": atom.segment_id,
+            "source_span": atom.source_span,
+            "observed_at": atom.observed_at.isoformat() if atom.observed_at else None,
+            "ingested_at": atom.ingested_at.isoformat() if atom.ingested_at else None,
+        },
+        "dedup": {
+            "content_hash": atom.content_hash,
+            "normalized_content_hash": atom.normalized_content_hash,
+        },
+    }
+
+
+def _valid_as_of(atom, as_of: date | None) -> bool:
+    if atom.is_superseded:
+        return False
+    if as_of is None:
+        return True
+    return (atom.valid_from is None or atom.valid_from <= as_of) and (
+        atom.valid_until is None or atom.valid_until >= as_of
+    )
+
+
 def _run_inference(cfg: dict) -> None:
     out_path = Path(cfg["out"])
     debug_path = out_path.with_suffix("").with_name(out_path.stem + ".debug.jsonl")
+    lattice_root = out_path.with_suffix("").with_name(out_path.stem + ".lattices")
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    if cfg["keep_lattice_dirs"]:
+        lattice_root.mkdir(parents=True, exist_ok=True)
 
     os.environ["LLM_PROVIDER"] = cfg["llm_provider"]
     os.environ["LLM_MODEL"] = cfg["llm_model"]
@@ -219,7 +286,7 @@ def _run_inference(cfg: dict) -> None:
     print(f"Already done: {len(done_ids)} — will skip")
 
     n_done = n_err = 0
-    atoms_created_total = atoms_selected_total = 0
+    atoms_created_total = atoms_selected_total = bm25_candidates_total = 0
 
     with (
         out_path.open("a") as out_f,
@@ -234,7 +301,12 @@ def _run_inference(cfg: dict) -> None:
             qtype = item["question_type"]
             pbar.set_description(qtype[:24])
 
-            tmpdir = tempfile.mkdtemp(prefix="lattice-eval-")
+            if cfg["keep_lattice_dirs"]:
+                tmpdir = str(lattice_root / qid)
+                shutil.rmtree(tmpdir, ignore_errors=True)
+                Path(tmpdir).mkdir(parents=True, exist_ok=True)
+            else:
+                tmpdir = tempfile.mkdtemp(prefix="lattice-eval-")
             try:
                 db = LatticeDB(lattice_dir=tmpdir)
 
@@ -245,16 +317,31 @@ def _run_inference(cfg: dict) -> None:
                 dates = item.get("haystack_dates", ["" for _ in sessions])
 
                 atoms_created = 0
+                duplicates_skipped = 0
+                ingest_results: list[dict] = []
                 all_atoms: list[dict] = []
 
                 for session, sid, ts in zip(sessions, session_ids, dates):
                     text = format_session(session, sid, ts)
                     ingest_result = ingest(
                         text,
-                        metadata={"source": "conversation", "date": ts},
+                        metadata={"source": "conversation", "date": ts, "session_id": sid},
                         db=db,
                     )
                     atoms_created += ingest_result["atoms_created"]
+                    duplicates_skipped += ingest_result.get("duplicates_skipped", 0)
+                    ingest_results.append(
+                        {
+                            "session_id": sid,
+                            "date": ts,
+                            "source_id": ingest_result.get("source_id"),
+                            "segments_processed": ingest_result.get("segments_processed"),
+                            "atoms_created": ingest_result.get("atoms_created"),
+                            "atom_ids": ingest_result.get("atom_ids", []),
+                            "duplicates_skipped": ingest_result.get("duplicates_skipped", 0),
+                            "duplicate_atom_ids": ingest_result.get("duplicate_atom_ids", []),
+                        }
+                    )
 
                 question_date_str: str | None = item.get("question_date")
                 as_of: date | None = None
@@ -264,15 +351,33 @@ def _run_inference(cfg: dict) -> None:
                     except ValueError:
                         pass
 
-                selected = select(item["question"], as_of=as_of, db=db)
+                bm25_atoms = db.search(
+                    item["question"], as_of=as_of, top_k=cfg["top_k"]
+                )
+                bm25_candidates = [
+                    _atom_debug_dict(atom, preview_chars=240) for atom in bm25_atoms
+                ]
+
+                if cfg["retrieval_mode"] == "select":
+                    selected = select(
+                        item["question"],
+                        as_of=as_of,
+                        db=db,
+                        top_k=cfg["top_k"],
+                    )
+                elif cfg["retrieval_mode"] == "bm25":
+                    selected = [_atom_debug_dict(atom) for atom in bm25_atoms]
+                else:
+                    selected = [
+                        _atom_debug_dict(atom)
+                        for atom in db.all()
+                        if _valid_as_of(atom, as_of)
+                    ]
+
                 synthesis = synthesize(item["question"], selected)
 
                 all_atoms = [
-                    {
-                        "atom_id": a.atom_id,
-                        "subject": a.subject,
-                        "content": a.content[:120],
-                    }
+                    _atom_debug_dict(a, preview_chars=240)
                     for a in db.all()
                 ]
 
@@ -287,10 +392,21 @@ def _run_inference(cfg: dict) -> None:
                         {
                             "question_id": qid,
                             "question_type": qtype,
+                            "lattice_dir": tmpdir,
+                            "lattice_dir_kept": bool(cfg["keep_lattice_dirs"]),
                             "sessions_ingested": len(sessions),
+                            "retrieval_mode": cfg["retrieval_mode"],
+                            "top_k": cfg["top_k"],
+                            "ingest_results": ingest_results,
                             "atoms_created": atoms_created,
+                            "duplicates_skipped": duplicates_skipped,
                             "atoms": all_atoms,
+                            "bm25_candidates": bm25_candidates,
+                            "bm25_candidate_ids": [
+                                atom["atom_id"] for atom in bm25_candidates
+                            ],
                             "atoms_selected": [a["atom_id"] for a in selected],
+                            "selected_atoms": selected,
                             "synthesis_raw": synthesis.raw_response,
                             "hypothesis": synthesis.answer,
                         }
@@ -301,6 +417,7 @@ def _run_inference(cfg: dict) -> None:
 
                 atoms_created_total += atoms_created
                 atoms_selected_total += len(selected)
+                bm25_candidates_total += len(bm25_candidates)
                 n_done += 1
 
             except Exception as exc:
@@ -312,18 +429,23 @@ def _run_inference(cfg: dict) -> None:
                 n_err += 1
 
             finally:
-                shutil.rmtree(tmpdir, ignore_errors=True)
+                if not cfg["keep_lattice_dirs"]:
+                    shutil.rmtree(tmpdir, ignore_errors=True)
 
             pbar.update(1)
 
     print("\n── Inference summary ──────────────────────────────────────────")
     print(f"  Processed : {n_done}")
     print(f"  Errors    : {n_err}")
+    print(f"  Retrieval : {cfg['retrieval_mode']} (top_k={cfg['top_k']})")
     if n_done:
         print(f"  Avg atoms created  : {atoms_created_total / n_done:.1f}")
+        print(f"  Avg BM25 candidates: {bm25_candidates_total / n_done:.1f}")
         print(f"  Avg atoms selected : {atoms_selected_total / n_done:.1f}")
     print(f"  Results   : {out_path}")
     print(f"  Debug     : {debug_path}")
+    if cfg["keep_lattice_dirs"]:
+        print(f"  Lattices  : {lattice_root}")
 
     ollama_host = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
     requests.post(
@@ -421,9 +543,24 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--log", default="", help="Override log file path")
     p.add_argument("--stratify", type=int, default=0)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument(
+        "--retrieval-mode",
+        choices=["select", "bm25", "all"],
+        default="",
+        help=(
+            "Selection diagnostic mode: select=BM25+LLM selection, "
+            "bm25=bypass LLM selection, all=bypass retrieval."
+        ),
+    )
+    p.add_argument("--top-k", type=int, default=0, help="Candidate count for BM25/select")
     p.add_argument("--evaluate-script", default="")
     p.add_argument("--print-qa-script", default="")
     p.add_argument("--print-retrieval-script", default="")
+    p.add_argument(
+        "--keep-lattice-dirs",
+        action="store_true",
+        help="Keep per-question LatticeDB directories so atom markdown files can be inspected.",
+    )
     return p.parse_args()
 
 
@@ -444,8 +581,10 @@ def main() -> None:
         print(f"LLM      : {cfg['llm_model']}")
         print(f"Judge    : {cfg['judge_model']}")
         print(f"Dataset  : {Path(cfg['dataset']).stem}")
+        print(f"Retrieve : {cfg['retrieval_mode']} (top_k={cfg['top_k']})")
         print(f"Out      : {cfg['out']}")
         print(f"Log      : {log_path}")
+        print(f"Keep DBs : {cfg['keep_lattice_dirs']}")
         print()
 
         if args.phase in ("inference", "all"):

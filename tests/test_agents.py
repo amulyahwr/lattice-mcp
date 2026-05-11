@@ -169,6 +169,24 @@ class TestIngest:
         assert atom.observed_at is not None
         assert atom.source_span == {"start": 0, "end": len("# Roadmap\n\nRoadmap has three phases.")}
 
+    def test_observed_at_parses_eval_date_format(self, db):
+        llm_atoms = [
+            {"subject": "Festival", "kind": "event", "source": "conversation",
+             "content": "Festival details were discussed.", "valid_from": None, "valid_until": None},
+        ]
+        with patch("lattice.ingest.complete", side_effect=[_ingest_response(llm_atoms)]):
+            result = ingest(
+                "Festival details were discussed.",
+                metadata={"source": "conversation", "date": "2023/05/25 (Thu) 06:05"},
+                db=db,
+            )
+
+        atom = db.read(result["atom_ids"][0])
+        assert atom.observed_at is not None
+        assert atom.observed_at.year == 2023
+        assert atom.observed_at.month == 5
+        assert atom.observed_at.day == 25
+
 
 # ── selection ─────────────────────────────────────────────────────────────────
 

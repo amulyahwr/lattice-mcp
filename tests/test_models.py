@@ -1,5 +1,6 @@
 from datetime import date, datetime, timezone
 
+import frontmatter
 import pytest
 
 from lattice.models import Atom
@@ -124,6 +125,21 @@ class TestAtomRoundTrip:
         assert restored.source_span == {"start": 0, "end": 12}
         assert restored.content_hash == "abc"
         assert restored.normalized_content_hash == "def"
+
+    def test_markdown_nests_provenance_and_dedup(self):
+        a = make_atom(
+            source_id="src-1",
+            segment_id="seg-1",
+            content_hash="abc",
+            normalized_content_hash="def",
+        )
+        metadata = frontmatter.loads(a.to_markdown()).metadata
+        assert "source_id" not in metadata
+        assert "content_hash" not in metadata
+        assert metadata["provenance"]["source_id"] == "src-1"
+        assert metadata["provenance"]["segment_id"] == "seg-1"
+        assert metadata["dedup"]["content_hash"] == "abc"
+        assert metadata["dedup"]["normalized_content_hash"] == "def"
 
     def test_roundtrip_multiline_content(self):
         content = "First line.\nSecond line.\nThird line."

@@ -61,6 +61,33 @@ uv run python -m lattice.eval.run_eval --phase inference
 
 Writes `results/run1.jsonl` (hypotheses) and `results/run1.debug.jsonl` (per-question diagnostics). Safe to interrupt — re-running resumes from where it stopped.
 
+### Selection diagnostics
+
+Use same ingest, swap retrieval mode, then compare judged accuracy and debug files:
+
+```bash
+# Product path: BM25 candidates -> LLM selector -> synthesis
+uv run python -m lattice.eval.run_eval --phase inference --retrieval-mode select --priority p3-select
+
+# Selection ablation: BM25 candidates go straight to synthesis
+uv run python -m lattice.eval.run_eval --phase inference --retrieval-mode bm25 --priority p3-bm25
+
+# Ceiling check: all valid atoms go to synthesis
+uv run python -m lattice.eval.run_eval --phase inference --retrieval-mode all --priority p3-all
+```
+
+Read result:
+
+| Pattern | Meaning |
+|---|---|
+| `bm25` > `select` | LLM selector dropping useful atoms |
+| `all` > `bm25` | BM25 candidate generation weak |
+| `select`/`bm25`/`all` all bad | Ingest missing facts or synthesis/reasoning weak |
+| Correct atom in `bm25_candidates`, missing from `atoms_selected` | Selector bug |
+| Correct atom in `selected_atoms`, bad answer | Synthesis bug |
+
+Set `--top-k 50` to test if selection improves with wider candidate pool. Debug rows include `retrieval_mode`, `top_k`, `bm25_candidates`, and `selected_atoms`.
+
 ### Judge only (inference already done)
 
 ```bash
