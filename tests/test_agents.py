@@ -70,6 +70,11 @@ class TestIngest:
 
         atom = db.read(result["atom_ids"][0])
         assert atom.metadata.get("title") == "README"
+        assert atom.source_title == "README"
+        assert atom.source_id == result["source_id"]
+        assert atom.ingested_at is not None
+        assert atom.content_hash
+        assert atom.normalized_content_hash
 
     def test_multiple_atoms_from_one_ingest(self, db):
         llm_atoms = [
@@ -127,6 +132,43 @@ class TestIngest:
         assert atom.valid_from == date(2024, 6, 1)
         assert atom.valid_until == date(2024, 6, 30)
 
+    def test_exact_duplicate_skipped(self, db):
+        llm_atoms = [
+            {"subject": "Project", "kind": "fact", "source": "user",
+             "content": "Project uses Python.", "valid_from": None, "valid_until": None},
+        ]
+        with patch("lattice.ingest.complete", side_effect=[_ingest_response(llm_atoms)]):
+            first = ingest("Project uses Python.", db=db)
+        with patch("lattice.ingest.complete", side_effect=[_ingest_response(llm_atoms)]):
+            second = ingest("Project uses Python.", db=db)
+
+        assert first["atoms_created"] == 1
+        assert second["atoms_created"] == 0
+        assert second["duplicates_skipped"] == 1
+        assert second["duplicate_atom_ids"] == first["atom_ids"]
+
+    def test_source_type_and_observed_at_from_metadata(self, db):
+        llm_atoms = [
+            {"subject": "Roadmap", "kind": "doc", "source": "document",
+             "content": "Roadmap has three phases.", "valid_from": None, "valid_until": None},
+        ]
+        with patch("lattice.ingest.complete", side_effect=[_ingest_response(llm_atoms)]):
+            result = ingest(
+                "# Roadmap\n\nRoadmap has three phases.",
+                metadata={
+                    "source_id": "src-roadmap",
+                    "source_type": "markdown",
+                    "observed_at": "2024-06-01T00:00:00+00:00",
+                },
+                db=db,
+            )
+
+        atom = db.read(result["atom_ids"][0])
+        assert atom.source_id == "src-roadmap"
+        assert atom.source_type == "markdown"
+        assert atom.observed_at is not None
+        assert atom.source_span == {"start": 0, "end": len("# Roadmap\n\nRoadmap has three phases.")}
+
 
 # ── selection ─────────────────────────────────────────────────────────────────
 
@@ -156,6 +198,7 @@ class TestSelect:
             result = select("Python", db=db)
         keys = set(result[0].keys())
         assert {"atom_id", "subject", "content", "kind", "source"}.issubset(keys)
+        assert {"source_id", "source_title", "segment_id", "observed_at"}.issubset(keys)
 
     def test_empty_db_returns_empty(self, db):
         result = select("anything", db=db)

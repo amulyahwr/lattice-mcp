@@ -39,10 +39,32 @@ Return a JSON object with an `atom_ids` key containing an array of atom_id strin
 def _atom_to_text(a: Atom) -> str:
     vf = a.valid_from.isoformat() if a.valid_from else "null"
     vu = a.valid_until.isoformat() if a.valid_until else "null"
+    observed = a.observed_at.isoformat() if a.observed_at else "null"
     return (
         f"[{a.atom_id}] subject={a.subject!r} kind={a.kind!r} "
-        f"valid_from={vf} valid_until={vu}\n{a.content}"
+        f"valid_from={vf} valid_until={vu} observed_at={observed} "
+        f"source_id={a.source_id!r} source_title={a.source_title!r}\n{a.content}"
     )
+
+
+def _atom_to_dict(a: Atom) -> dict:
+    return {
+        "atom_id": a.atom_id,
+        "subject": a.subject,
+        "content": a.content,
+        "kind": a.kind,
+        "source": a.source,
+        "valid_from": a.valid_from.isoformat() if a.valid_from else None,
+        "valid_until": a.valid_until.isoformat() if a.valid_until else None,
+        "ingested_at": a.ingested_at.isoformat() if a.ingested_at else None,
+        "observed_at": a.observed_at.isoformat() if a.observed_at else None,
+        "source_id": a.source_id,
+        "source_title": a.source_title,
+        "session_id": a.session_id,
+        "segment_id": a.segment_id,
+        "source_type": a.source_type,
+        "source_span": a.source_span,
+    }
 
 
 def select(
@@ -77,13 +99,5 @@ def select(
     for atom_id in ranked_ids:
         a = id_to_atom.get(atom_id)
         if a:
-            result.append({
-                "atom_id": a.atom_id,
-                "subject": a.subject,
-                "content": a.content,
-                "kind": a.kind,
-                "source": a.source,
-                "valid_from": a.valid_from.isoformat() if a.valid_from else None,
-                "valid_until": a.valid_until.isoformat() if a.valid_until else None,
-            })
+            result.append(_atom_to_dict(a))
     return result

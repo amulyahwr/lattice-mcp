@@ -129,6 +129,14 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                         "source": a.source,
                         "valid_from": a.valid_from.isoformat() if a.valid_from else None,
                         "valid_until": a.valid_until.isoformat() if a.valid_until else None,
+                        "ingested_at": a.ingested_at.isoformat() if a.ingested_at else None,
+                        "observed_at": a.observed_at.isoformat() if a.observed_at else None,
+                        "source_id": a.source_id,
+                        "source_title": a.source_title,
+                        "session_id": a.session_id,
+                        "segment_id": a.segment_id,
+                        "source_type": a.source_type,
+                        "source_span": a.source_span,
                     })
                 except Exception:
                     pass

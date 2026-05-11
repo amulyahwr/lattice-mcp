@@ -16,7 +16,7 @@ Required env vars for running the server: `LLM_PROVIDER`, `LLM_MODEL`, `LATTICE_
 
 ## Architecture
 
-The pipeline is: **ingest → select → synthesize**, each backed by an LLM call via `lattice/llm.py`.
+The current pipeline is: **ingest → select → synthesize**, each backed by an LLM call via `lattice/llm.py`. The product direction is local-first lattice-mcp: source-aware ingest, provenance, deterministic graph sidecars, graph-seeded selection, and optional enrichment that never blocks local querying.
 
 ```
 server.py          MCP stdio entrypoint. Owns one shared LatticeDB instance.
@@ -30,6 +30,15 @@ lattice/
   synthesis.py     LLM generates prose answer from a list of atom dicts.
 ```
 
+### Product roadmap guardrails
+
+- Keep architecture local-first: no hosted service, no required daemon, no external DB.
+- Keep atoms human-readable and git-trackable.
+- Treat LongMemEval as an eval yardstick only; do not add benchmark-shaped hacks to product paths.
+- Prefer provenance fields and graph edges over mutating atom content for retrieval.
+- Query paths should use committed snapshots and should not wait for active ingest/enrichment.
+- Expensive relation enrichment, embeddings, and hub labeling must remain optional, especially for Ollama users.
+
 ### Key data flow details
 
 **Supersession** (in `ingest.py`): when a new atom has the same subject as an existing one, an LLM call decides if it supersedes. Fast path uses `subjects.json`; slow path scans files (handles hand-edited atoms). Superseded atoms stay on disk with `is_superseded=true` and bidirectional links (`superseded_by` / `supersedes`).
@@ -39,6 +48,8 @@ lattice/
 **Atom storage**: every atom is a `.md` file with YAML frontmatter. `LatticeDB` has an in-memory cache (`_atom_cache`). Cache is per-instance; `server.py` reuses one instance per process.
 
 **BM25**: built fresh on each `db.search()` call from all non-superseded atoms. No persistent index.
+
+This is current MVP behavior, not the target product shape. Roadmap priorities in `lattice/eval/PRIORITIES.md` move search toward cached BM25/graph snapshots.
 
 ### Test conventions
 

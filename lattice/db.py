@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import tempfile
 from datetime import date
 from pathlib import Path
 
@@ -54,7 +55,7 @@ class LatticeDB:
         subjects = self._load_subjects()
         old_id = subjects.get(key)
         subjects[key] = atom_id
-        self._subjects_file.write_text(json.dumps(subjects))
+        self._write_json_atomic(self._subjects_file, subjects)
         self._subjects_cache = subjects
         return old_id if old_id != atom_id else None
 
@@ -66,11 +67,33 @@ class LatticeDB:
     def _path(self, atom_id: str) -> Path:
         return self.dir / f"{atom_id}.md"
 
+    def _write_json_atomic(self, path: Path, data: dict) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", text=True)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            Path(tmp_name).replace(path)
+        finally:
+            tmp = Path(tmp_name)
+            if tmp.exists():
+                tmp.unlink()
+
     # ── write ─────────────────────────────────────────────────────────────
 
     def write(self, atom: Atom) -> None:
         text = atom.to_markdown()
-        self._path(atom.atom_id).write_text(text, encoding="utf-8")
+        path = self._path(atom.atom_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", text=True)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(text)
+            Path(tmp_name).replace(path)
+        finally:
+            tmp = Path(tmp_name)
+            if tmp.exists():
+                tmp.unlink()
         self._atom_cache[atom.atom_id] = atom
 
     # ── read ──────────────────────────────────────────────────────────────
@@ -116,6 +139,12 @@ class LatticeDB:
 
     def by_subject(self, subject: str) -> list[Atom]:
         return [a for a in self.all() if a.subject.lower() == subject.lower()]
+
+    def find_by_normalized_hash(self, normalized_content_hash: str) -> Atom | None:
+        for atom in self.all():
+            if atom.normalized_content_hash == normalized_content_hash:
+                return atom
+        return None
 
     def subjects(self) -> list[str]:
         seen: set[str] = set()

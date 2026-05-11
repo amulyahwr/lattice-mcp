@@ -8,14 +8,15 @@ Usage:
     python -m lattice.eval.run_eval --stratify 10               # quick smoke test (10 questions)
     python -m lattice.eval.run_eval --out results/myrun.jsonl   # custom output path
 
-    # capture stdout + stderr to a log file while still seeing progress:
-    python -m lattice.eval.run_eval --phase inference 2>&1 | tee run_<llm>_<dataset>_<phase>.log
-    python -m lattice.eval.run_eval --phase judge 2>&1 | tee run_<judge_llm>_<dataset>_<phase>.log
-    python -m lattice.eval.run_eval --phase all 2>&1 | tee run_<llm>_<judge_llm>_<dataset>_<phase>.log
+    # stdout + stderr are tee'd to a log file automatically:
+    python -m lattice.eval.run_eval --phase inference
+    python -m lattice.eval.run_eval --phase judge
+    python -m lattice.eval.run_eval --phase all
+    python -m lattice.eval.run_eval --log logs/custom.log       # custom log path
 
     # file naming convention (auto-derived):
     #   results/<llm>_<judge>_<dataset>_<phase>.jsonl
-    #   run_<llm>_<judge>_<dataset>_<phase>.log
+    #   logs/run_<llm>_<judge>_<dataset>_<phase>.log
     # e.g.: results/gemma4e4b_qwen2514b_longmemeval_oracle_inference.jsonl
 
     # Debug viewer — browse results by question, failure mode, atoms:
@@ -81,7 +82,9 @@ def _default_out(llm_model: str, dataset: str, priority: str) -> str:
     return f"{_results_dir(priority)}/{_slug(llm_model)}_{ds}_inference.jsonl"
 
 
-def _default_log(llm_model: str, judge_model: str, dataset: str, phase: str, priority: str) -> str:
+def _default_log(
+    llm_model: str, judge_model: str, dataset: str, phase: str, priority: str
+) -> str:
     ds = Path(dataset).stem
     base = _logs_dir(priority)
     if phase == "inference":
@@ -95,6 +98,7 @@ def _default_log(llm_model: str, judge_model: str, dataset: str, phase: str, pri
 
 class _Tee:
     """Write to multiple streams simultaneously."""
+
     def __init__(self, *streams):
         self.streams = streams
 
@@ -112,8 +116,8 @@ class _Tee:
 
 def _load_config(args: argparse.Namespace) -> dict:
     load_dotenv(".env.eval", override=False)
-    model = os.environ.get("LLM_MODEL", "gemma4:26b")
-    judge = os.environ.get("JUDGE_MODEL", "qwen2.5:14b")
+    model = os.environ.get("LLM_MODEL", "gemma4:e4b")
+    judge = os.environ.get("JUDGE_MODEL", "qwen3.5:14b")
     dataset = args.dataset or os.environ.get("DATASET", _DEFAULT_DATASET)
     phase = args.phase
     priority = args.priority or os.environ.get("PRIORITY", "")
@@ -132,7 +136,8 @@ def _load_config(args: argparse.Namespace) -> dict:
         "litellm_port": int(os.environ.get("LITELLM_PORT", "4000")),
         "evaluate_script": args.evaluate_script
         or os.environ.get("EVALUATE_SCRIPT", ""),
-        "print_qa_script": args.print_qa_script or os.environ.get("PRINT_QA_SCRIPT", ""),
+        "print_qa_script": args.print_qa_script
+        or os.environ.get("PRINT_QA_SCRIPT", ""),
         "print_retrieval_script": args.print_retrieval_script
         or os.environ.get("PRINT_RETRIEVAL_SCRIPT", ""),
     }
@@ -321,7 +326,9 @@ def _run_inference(cfg: dict) -> None:
     print(f"  Debug     : {debug_path}")
 
     ollama_host = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
-    requests.post(f"{ollama_host}/api/generate", json={"model": cfg["llm_model"], "keep_alive": 0})
+    requests.post(
+        f"{ollama_host}/api/generate", json={"model": cfg["llm_model"], "keep_alive": 0}
+    )
     print(f"Unloaded {cfg['llm_model']} from GPU.")
 
 
@@ -385,7 +392,8 @@ def _run_judge(cfg: dict) -> None:
             if script:
                 out = subprocess.run(
                     [sys.executable, script, *args],
-                    capture_output=True, text=True,
+                    capture_output=True,
+                    text=True,
                 )
                 if out.stdout:
                     print(out.stdout, end="")
@@ -405,7 +413,9 @@ def _run_judge(cfg: dict) -> None:
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="LongMemEval harness for lattice-mcp")
     p.add_argument("--phase", choices=["inference", "judge", "all"], default="all")
-    p.add_argument("--priority", default="", help="Iteration label, e.g. baseline, p1, p2")
+    p.add_argument(
+        "--priority", default="", help="Iteration label, e.g. baseline, p1, p2"
+    )
     p.add_argument("--dataset", default="")
     p.add_argument("--out", default="", help="Override inference results file path")
     p.add_argument("--log", default="", help="Override log file path")

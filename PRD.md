@@ -21,12 +21,12 @@ A local-first MCP server (`lattice-mcp`) that any MCP-compatible coding assistan
 9. As a developer, I want atoms to automatically detect when a new fact supersedes an older one about the same subject so that the lattice stays consistent without manual cleanup.
 10. As a developer, I want to call `lattice_select` with a natural language query so that the most relevant atoms are returned ranked by relevance.
 11. As a developer, I want `lattice_select` to accept an optional `as_of` date so that I can query the state of my knowledge at a past point in time.
-12. As a developer, I want `lattice_select` to combine BM25 keyword search with LLM re-ranking so that I get both keyword precision and semantic relevance.
+12. As a developer, I want `lattice_select` to use a local index and graph-aware retrieval so that queries remain fast and relevant as my lattice grows.
 13. As a developer, I want to call `lattice_answer` and receive a synthesized prose answer so that I don't need to manually read and synthesize multiple atoms.
 14. As a developer, I want `lattice_answer` to auto-run selection if no atom IDs are provided so that I can get a direct answer from a single tool call.
 15. As a developer using a weak local model (e.g. Ollama), I want to call `lattice_select` directly and synthesize the answer myself so that I can offload expensive synthesis to my local assistant.
 16. As a developer, I want atoms to carry optional `valid_from` and `valid_until` dates so that time-bounded facts (e.g. a person's role, a price, a policy) are automatically excluded when querying outside their validity window.
-17. As a developer, I want atoms to carry a `metadata` passthrough dict so that I can attach arbitrary context (URL, author, date, title) without schema changes.
+17. As a developer, I want atoms to carry structured provenance (`source_id`, title, observed time, source span, hashes) plus passthrough metadata so that answers can be inspected, cited, and deduplicated.
 18. As a developer, I want each atom to have a stable UUID so that I can reference specific atoms in `lattice_answer` calls and in supersession links.
 19. As a developer, I want `lattice_ingest` to return the list of created atom IDs so that I can immediately reference or inspect the ingested atoms.
 20. As a developer, I want to point `LATTICE_DIR` at any directory via env var so that I can maintain separate lattices per project.
@@ -42,17 +42,19 @@ A local-first MCP server (`lattice-mcp`) that any MCP-compatible coding assistan
 
 - **LatticeDB (atom store)** — Filesystem-backed store. One atom = one `.md` file in `LATTICE_DIR`. Provides: write atom, read atom by ID, list all atoms, list by subject, BM25 full-text search, and `as_of` temporal filtering. Supersession links are written atomically when a new atom supersedes an old one. BM25 index rebuilt on read (v1); persistent index is a v2 optimization.
 
+- **Graph Index (product target)** — Local file-backed graph sidecars (`nodes.jsonl`, `edges.jsonl`, `sources.json`, `graph/manifest.json`) loaded into a NetworkX-style in-memory graph. Deterministic nodes and edges connect atoms to sources, segments, subjects, duplicate groups, and update chains. The graph has committed versions so selection can query stable snapshots while ingest continues.
+
 - **LLM Client** — LiteLLM-based. Reads `LLM_PROVIDER`, `LLM_MODEL`, `LLM_API_KEY` from env. Exposes a single `complete(messages) -> str` interface. No provider-specific SDK imports.
 
 - **Internal Agent Tools** — Thin wrappers over LatticeDB: `search_atoms(query, as_of)`, `read_atom(atom_id)`, `list_subjects()`, `list_all_atoms()`. Used by the ingest, selection, and synthesis agents.
 
-- **Ingest Agent** — Takes raw text string. Uses LLM to decompose into discrete atoms (subject + content + kind + source). Resolves relative dates in content to absolute ISO dates. Detects supersession by comparing new atoms against existing atoms on the same subject. Writes atoms to LatticeDB. Returns `{atoms_created, atom_ids}`.
+- **Ingest Agent** — Takes raw text string in v1. Product direction is source-aware segmentation and provenance: source IDs, segment IDs, source spans, observed times, and content hashes. The ingest path should commit each source independently and perform cheap exact dedup before writing atoms.
 
-- **Selection Agent** — Takes natural language query + optional `as_of`. Retrieves BM25 candidates from LatticeDB. Uses LLM to re-rank and filter for relevance. Returns ranked list of atom dicts with fields: atom_id, subject, content, kind, source, valid_from, valid_until.
+- **Selection Agent** — Takes natural language query + optional `as_of`. Current implementation uses BM25 candidates plus LLM filtering. Product direction is graph-seeded selection over committed snapshots: seed from lexical search, expand through source/segment/subject/update edges, collapse duplicate/supersession groups, then use LLM tool calls for final inclusion.
 
-- **Synthesis Agent** — Takes query + list of atom dicts. Uses LLM to produce a single coherent prose answer. No database access — purely a prompt-in/string-out transform.
+- **Synthesis Agent** — Takes query + list of atom dicts. Uses LLM to produce a concise answer with uncertainty when evidence is weak or conflicting. Product output should not expose hidden chain-of-thought by default; citations/source snippets are optional when provenance is available.
 
-- **MCP Server** — Entry point. Exposes exactly 3 MCP tools: `lattice_ingest`, `lattice_select`, `lattice_answer`. Reads all configuration from env vars. Communicates via stdio (MCP protocol). No HTTP server, no ports.
+- **MCP Server** — Entry point. Exposes core tools: `lattice_ingest`, `lattice_select`, `lattice_answer`. Product direction includes local status/batch-ingest helpers when MCP client concurrency supports them. Reads all configuration from env vars. Communicates via stdio (MCP protocol). No HTTP server, no ports.
 
 ### API Contracts
 
@@ -63,11 +65,11 @@ A local-first MCP server (`lattice-mcp`) that any MCP-compatible coding assistan
 ### Architectural Decisions
 
 - **LiteLLM** as single LLM interface — no provider-specific SDK imports. Provider routing via env vars.
-- **Filesystem storage** — atoms as `.md` files, human-readable, git-trackable. No SQLite, no vector DB (v1).
+- **Filesystem storage** — atoms as `.md` files plus portable graph/index sidecars, human-readable where practical, git-trackable. No hosted DB.
 - **stdio transport** — coding assistant spawns server as subprocess. No HTTP.
 - **`as_of` only on select** — not on `lattice_answer` (passed through internally when atom_ids not provided).
-- **Supersession v1** — only supersession edges. Typed edges (e.g. contradicts, refines) deferred to v2.
-- **Text-only ingestion v1** — `source` param is raw text string. File path (v2), directory (v3) deferred.
+- **Graph-first lattice** — supersession exists today; product direction adds deterministic graph edges first, then optional semantic relation enrichment.
+- **Text-only ingestion v1** — `source` param is raw text string. File path and directory ingestion remain roadmap items, implemented through the same source-aware segmentation/provenance path.
 - **Distribution** — PyPI + `uvx lattice-mcp`. Zero-clone install.
 
 ### Environment Variables
@@ -117,22 +119,17 @@ A local-first MCP server (`lattice-mcp`) that any MCP-compatible coding assistan
 
 ## Out of Scope
 
-- File path ingestion (v2 roadmap)
-- Directory ingestion (v3 roadmap)
-- Typed lattice edges beyond supersession (contradicts, refines, etc.)
-- Persistent/incremental BM25 index (v2)
-- Vector/embedding-based retrieval
+- Hosted cloud sync
 - Cloud deployment or HTTP transport
 - Multi-lattice per server instance
-- LongMemEval benchmark harness (lives in the research repo, not here)
 - Web UI or atom browser
 - Atom deletion / garbage collection
 - Auth or multi-user access control
 
 ## Further Notes
 
-- The BM25 + LLM re-rank selection pipeline was validated on LongMemEval with a measurable improvement; this pattern should be preserved in the port.
-- Date resolution in the ingest agent (converting relative dates in source text to absolute ISO dates) was validated with a +0.14 improvement on the benchmark; this logic must be preserved.
+- LongMemEval is an evaluation yardstick for long-memory pressure, not the product target. Product changes should be measured with it, but benchmark-specific hacks should stay out of core paths.
+- Temporal information should be represented through provenance and validity fields where possible, not by mutating atom content solely to satisfy a benchmark.
 - The `lattice_answer` tool exists primarily to serve weaker local models (Ollama) where the calling assistant cannot reliably synthesize multi-atom answers on its own. Power users on strong models will typically call `lattice_select` + synthesize inline.
 - Atom files being plain markdown means users can hand-edit, delete, or version-control their knowledge store independently of the server. The server should tolerate hand-edited files gracefully.
 - `uvx` install requires the package to be on PyPI. Publishing to PyPI is part of the initial milestone.

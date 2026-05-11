@@ -2,7 +2,7 @@
 
 A local-first MCP server that gives any MCP-compatible AI coding assistant persistent, structured memory.
 
-Text you ingest is decomposed into discrete **atoms** — one fact per file, stored as human-readable markdown in a directory you control. Atoms can supersede each other, carry temporal validity windows, and are retrieved via BM25 + LLM re-ranking.
+Text you ingest is decomposed into discrete **atoms** — one fact per file, stored as human-readable markdown in a directory you control. The product direction is a local lattice: atoms connected to source, segment, subject, duplicate, and update nodes so selection can navigate memory instead of scanning a flat folder.
 
 ## Install
 
@@ -61,6 +61,8 @@ metadata  — optional dict (title, url, author, date, …)
 → { atoms_created: N, atom_ids: [...] }
 ```
 
+For larger local knowledge bases, the roadmap is source-aware ingestion: source IDs, source spans, exact deduplication, and per-source commits so useful partial memory becomes queryable quickly.
+
 ### `lattice_select(query, as_of?)`
 
 Returns the most relevant atoms for a natural language query.
@@ -71,6 +73,8 @@ as_of   — optional ISO date (YYYY-MM-DD); filters to atoms valid at that date
 
 → [ { atom_id, subject, content, kind, source, valid_from, valid_until }, ... ]
 ```
+
+The current implementation uses BM25 + LLM filtering. The product roadmap adds an incremental graph index and committed snapshots so selection stays fast while ingest is active.
 
 ### `lattice_answer(query, atom_ids?, as_of?)`
 
@@ -105,6 +109,10 @@ Project Alpha targets enterprise customers and launched in Q1 2025.
 ```
 
 All files are human-readable and git-trackable. You can hand-edit them.
+
+## Evaluation
+
+LongMemEval is used as a yardstick for long-memory pressure, not as the product target. Product priorities live in `lattice/eval/PRIORITIES.md`; benchmark-specific code stays under `lattice/eval/`.
 
 ## Development
 

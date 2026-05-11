@@ -1,61 +1,93 @@
-# Eval Improvement Priorities
+# lattice-mcp Product Priorities
 
-Baseline: 15% accuracy (100q, gemma4:e4b inference, qwen3.5:4b judge, longmemeval_oracle)
+Goal: build a local-first MCP server for persistent, inspectable knowledge that works well with coding assistants and local models. LongMemEval is an evaluation yardstick, not the product target.
 
-Failure breakdown (updated after p1 analysis):
-- 20% of questions: selection returns 0 atoms despite 26+ atoms created
-- 56% of questions: atoms selected but synthesis still wrong
-- **100% of atoms have null valid_from** — root cause of all 26 temporal-reasoning failures
-- ~10% of atoms are near-duplicates — wastes selection budget
-- Multi-session selection failure rate (30%) worse than overall (20%)
+Product constraints:
 
-Methodology: implement one priority → full 100q eval → measure delta → decide next.
+- Local-only: no hosted service, no required daemon, no external database.
+- Works with API models and Ollama; expensive enrichment must be optional.
+- Atom files remain human-readable and git-trackable.
+- Ingest can handle many local sources, but useful partial memory should commit quickly.
+- Selection should be fast, graph-aware, and should not wait for active ingest or background enrichment.
 
-| Priority | File(s) | Change | Est. ROI |
-|----------|---------|--------|----------|
-| P1 ✅ | `synthesis.py` | Add `thinking: str` field to `_Answer` (CoT before answer); strengthen no-info prompt rule | Done — +8.8pp |
-| P2 ✅ | `ingest.py` | **Date injection**: prepend session date into atom `content` as "On {date}: ..." — 100% of p1 atoms had null valid_from, root cause of all 26 temporal failures · 5 lines · re-ingest needed | Very High — fixes root cause of 26% of questions with near-zero code |
-| P3 ✅ | `selection.py` | **Question-type-aware selection prompt**: detect temporal/multi-session signals in query and inject type-specific instructions ("prioritise atoms with explicit dates", "look across distinct time periods") — prompt-only, zero infra, targets 53/100 worst failures | High — zero cost, directly targets the two worst categories |
-| P4 ✅ | `selection.py` | **HyDE**: generate a hypothetical answer atom before BM25 search to bridge query↔atom vocabulary gap | High — 1 LLM call, no infra, helps all question types |
-| P5 ✅ | `ingest.py`, `models.py`, `db.py` | **Question generation per atom**: generate 2-3 natural questions per atom, store in `questions` field (BM25-searchable) — reverted: 16.0% vs p1 23.8% (−7.8pp). Root cause: generated questions pollute BM25 with false-positive matches (e.g. "What does Alice drink?" causes coffee atom to match unrelated drink queries), pushing relevant atoms out of top-20 candidates | Reverted |
-| P6 | `ingest.py` | **Adaptive chunking**: if `len(source)` ≤ threshold (default ~2000 chars) → single extraction call (current behavior, zero overhead); if longer → split at paragraph boundaries (`\n\n`) into ~500-word chunks → extract atoms per chunk in parallel via `ThreadPoolExecutor`; configurable via `INGEST_CHUNK_SIZE` env var. No domain assumptions — works for READMEs, meeting notes, Slack exports, code docs, any text. Dedup across chunks handled by existing supersession logic. | Medium-High — zero cost for typical short MCP ingests; improves extraction completeness on long sources by reducing attention dilution; general-purpose |
-| P7 | `llm.py`, `selection.py` | Extend `complete()` with `tools/tool_choice/reasoning`; replace bulk JSON selection with `include_atom(atom_id, reason)` tool calls + zero-selection fallback (top-5 BM25 if 0 selected) | High — eliminates 20% silent 0-atom selection failures |
-| P8 | `ingest.py`, `db.py` | **Atom deduplication**: before writing, BM25-score new atom against existing atoms on same subject; if similarity > threshold, merge instead of creating duplicate — eliminates ~10% near-duplicate noise that wastes selection budget | Medium-High — cleaner atom store benefits all retrieval methods |
-| P9 | `selection.py` | **Multi-pass retrieval**: seed second BM25 pass with first-round atom content; second LLM selection call knows what's already found and looks for what's missing (opt-in via `SELECT_PASSES=2`) | Medium-High for multi-session (30% selection failure vs 20% overall) · needs P7 infra |
-| P10 | `ingest.py` | **Session summary atom**: after ingesting each session, generate one summary atom (date + key topics + notable facts) — coarse-grained index for multi-session retrieval to land on before fine atom selection | Medium for multi-session (27q) · 1 extra LLM call per session · re-ingest needed |
-| P11 | `synthesis.py`, `selection.py` | **Uncertainty-triggered re-retrieval**: when synthesis `thinking` contains "do not contain" / "no date" / "impossible to determine", extract missing fact type and run a targeted second selection pass | Medium — turns synthesis expressed uncertainty into retrieval feedback signal |
-| P12 | `llm.py`, `db.py` | **Semantic embeddings**: `embed()` via ollama + hybrid BM25+cosine search; store `.emb` files at ingest — structural fix for vocabulary mismatch | Highest long-term · most effort · needs embedding model pulled |
-| P13 | `ingest.py` | **Ingest tool calling**: replace bulk JSON extraction with `record_atom(...)` tool calls — per-atom reasoning, eliminates JSON parse failures | Medium — improves atom extraction quality; needs re-ingest to take effect |
+## Active Product Roadmap
 
-## Results
+| Priority | File(s) | Product Change | Why It Matters |
+| --- | --- | --- | --- |
+| P1 ✅ | `README.md`, `PRD.md`, `CLAUDE.md`, `lattice/eval/README.md` | **Product documentation cleanup**: update docs so product architecture is local-first lattice-mcp, not benchmark-preservation. Move LongMemEval guidance under eval-only docs, remove “must preserve benchmark win” language, and document graph/provenance/status concepts as product goals. | Done — prevents future implementation drift back toward research harness assumptions. |
+| P2 ⏭️ | `llm.py`, `selection.py` | **Selection tool calling + fallback**: extend `complete()` with `tools` / `tool_choice`; replace bulk JSON selection with `include_atom(atom_id, reason)` calls; if the model selects nothing, fall back to top BM25 candidates. | Skipped for now by product direction; still useful before or during graph-seeded selection. |
+| P3 ✅ | `models.py`, `ingest.py`, `selection.py`, `synthesis.py` | **Source-aware ingest + provenance + exact dedup**: add `ingested_at`, optional `observed_at`, `source_id`, `source_title`, `session_id`, `segment_id`, `source_type`, `source_span`, `content_hash`, and `normalized_content_hash`. Segment by source type: Markdown headings, chat turns/windows, code/docs symbols or sections, plain text overlapped windows. Commit each source independently and skip/mark exact duplicates before write. | Done — atoms now carry provenance/hash fields, ingest segments sources with bounded workers, exact duplicates are skipped, and selection/synthesis expose provenance. |
+| P4 | `graph.py`, `db.py`, `ingest.py` | **Incremental heterogeneous graph index**: add a local NetworkX-style `MultiDiGraph` compute layer backed by portable sidecars: `nodes.jsonl`, `edges.jsonl`, `sources.json`, `graph/manifest.json`. Deterministic nodes/edges: `atom:<id>`, `source:<id>`, `segment:<id>`, `subject:<normalized>`, `source_contains_segment`, `segment_contains_atom`, `atom_has_subject`, `same_subject_as`, `same_hash`, `supersedes` / `updates`. Use atomic writes, graph versions, and cache reload only when the manifest changes. | Turns a flat atom folder into a real lattice while preserving local, file-based storage. |
+| P5 | `selection.py`, `graph.py`, `db.py` | **Graph-seeded selection over committed snapshots**: selection reads the latest committed graph/BM25 snapshot and never waits for active ingest. BM25 seeds atoms/subjects/sources, then bounded BFS or lightweight personalized PageRank expands through source/segment/subject/update edges. Collapse duplicate/supersession groups before final `include_atom` calls. | Improves relevance and latency, reduces duplicate context waste, and enables query-while-ingest. |
+| P6 | `ingest.py`, `server.py`, `db.py` | **Local ingest jobs + status UX**: keep simple `lattice_ingest` for small sync inputs. Add persistent status for batch/background ingest: `job_id`, indexed/active/failed source counts, enrichment pending, `graph_version`, `last_commit_at`. If MCP client concurrency works well, expose `lattice_ingest_start` and `lattice_ingest_status`; otherwise keep status internal/debug. | Local users need to know what has been indexed and should be able to query committed memory without waiting for a large ingest to finish. |
+| P7 | `graph.py`, `db.py`, `ingest.py`, `selection.py` | **Optional semantic relation enrichment**: after deterministic graph indexing, optionally add high-confidence edges: `updates`, `contradicts`, `supports`, `elaborates`, `temporally_before`. Run as explicit/background enrichment, off or cheap by default for Ollama. | Adds deeper reasoning paths without making local ingest/query latency worse. |
+| P8 | `graph.py`, `selection.py` | **Topic hubs / community index**: create hub nodes from connected components first; later optional label propagation or modularity over subject/source/relation edges. Hubs store aliases, member atoms, latest `observed_at`, and centroid text. Selection falls back cleanly when hubs are stale. | Helps broad queries land on coarse concepts before atoms, while keeping hub generation eventually consistent. |
+| P9 | `ingest.py` | **Ingest tool calling**: replace bulk JSON extraction with `record_atom(...)` tool calls where provider support is good; keep JSON fallback for local models/providers that handle structured JSON better. | Improves extraction reliability without forcing one LLM interface path. |
+| P10 | `llm.py`, `db.py`, `selection.py` | **Optional semantic embeddings**: add `embed()` and hybrid BM25 + vector search as an optional index. Store embeddings in portable sidecars and make model choice explicit. | Useful for vocabulary mismatch, but should not be required for the local-first baseline. |
+| P11 | `synthesis.py`, `server.py` | **Product answer contract**: replace eval-style hidden CoT contract with a product response shape: concise answer, optional evidence/citations, explicit uncertainty when selected atoms are weak or conflicting, and no forced answer merely because some atoms were selected. Keep raw reasoning out of normal tool output. | Makes `lattice_answer` trustworthy for real users instead of benchmark-optimized. |
+| P12 | `selection.py`, `server.py` | **Selection debug/status mode**: optional debug output includes graph version, indexed source counts, BM25 ranks/scores, graph expansion paths, fallback trigger, and final include reasons. | Makes memory behavior explainable during product debugging without noisy normal answers. |
+| P13 | `selection.py`, `synthesis.py`, `server.py` | **Source-grounded answer mode**: optionally return citations/snippets for selected atoms using `source_title`, `source_id`, and `source_span` when available. Normal answers stay concise. | Builds user trust in local memory and makes stored knowledge inspectable. |
+| P14 | `db.py`, `server.py` | **Memory namespaces**: support project/workspace isolation via `LATTICE_NAMESPACE` or equivalent local directory layout. | Prevents cross-project memory contamination, which matters more for real users than benchmark score. |
 
-| Run | Priority | Accuracy | Notes |
-|-----|----------|----------|-------|
-| baseline | — | 15.0% | gemma4:e4b · qwen3.5:4b judge · 100q oracle |
-| p1 | Synthesis CoT | 23.8% | task-avg 25.2% · multi-session 22.2% · temporal 7.4% |
-| p2 | Date injection into atom content | 19.0% | task-avg 23.1% · multi-session 3.7% · temporal 0.0% · regression vs p1 — reverted |
-| p3 | Question-type-aware selection (temporal-only) | 18.0% | task-avg 20.1% · temporal 0.0% · regression vs p1 — reverted |
-| p4 | HyDE expansion | skipped | BM25 + hallucinated vocab = wrong atom retrieval; HyDE suited for dense/embedding retrieval only |
-| p5 | Question generation per atom | 16.0% | task-avg 18.2% · multi-session 7.4% · temporal 7.7% · regression vs p1 — reverted |
-| p6 | Adaptive chunking | 22.0% | multi-session 14.8% · single-session-assistant 36.4% · regression vs p1 (-1.8pp). Root cause: paragraph chunking splits cross-paragraph references, losing coreference context across chunks. Kept in code (useful for truly long sources); needs smarter boundary detection (e.g. overlap or sentence-level) to avoid context loss |
-| p7 | Selection tool calling + fallback | — | |
-| p8 | Atom deduplication | — | |
-| p9 | Multi-pass retrieval | — | |
-| p10 | Session summary atom | — | |
-| p11 | Uncertainty re-retrieval | — | |
-| p12 | Semantic embeddings | — | |
-| p13 | Ingest tool calling | — | |
+## Removed From Active Roadmap
 
-## Per-category tracker
+These remain useful experiment history, but are no longer product priorities:
+
+- Date injection into atom content: helped some eval categories but polluted content and hurt temporal/multi-session reasoning.
+- Question-type prompt patches: too benchmark-shaped and brittle.
+- HyDE over BM25: hallucinated vocabulary hurt sparse retrieval.
+- Generated questions per atom: polluted BM25 and caused false positives.
+- Session summary atoms: LongMemEval-shaped; topic hubs and source nodes are the product-native version.
+- Multi-pass retrieval and uncertainty-triggered re-retrieval: add latency and brittle control flow; graph-seeded selection should solve the product problem first.
+
+## LongMemEval Yardstick
+
+LongMemEval is used to measure whether product changes improve retrieval and answer quality under long-memory pressure. It should not dictate architecture.
+
+Current baseline:
+
+- 15.0% accuracy, 100 questions
+- inference: `gemma4:e4b`
+- judge: `qwen3.5:4b`
+- harness: `longmemeval_oracle`
+
+Observed failure modes:
+
+- 20% of questions: selection returns 0 atoms despite 26+ atoms created.
+- 56% of questions: atoms selected but synthesis still wrong.
+- 100% of atoms had null `valid_from` in early runs, exposing missing provenance/time structure.
+- About 10% of atoms are near-duplicates, wasting selection budget.
+- Multi-session selection failures are worse than overall failures.
+
+Evaluation method:
+
+- Implement one product priority at a time.
+- Run full 100-question LongMemEval.
+- Compare overall score and category movement.
+- Keep product-fit changes even if benchmark movement is mixed, but do not optimize architecture solely for LongMemEval.
+
+## Experiment History
+
+| Run | Change | Accuracy | Notes |
+| --- | --- | --- | --- |
+| baseline | none | 15.0% | `gemma4:e4b` inference, `qwen3.5:4b` judge, 100q oracle |
+| p1 | Synthesis CoT | 23.8% | Best measured gain so far; task-avg 25.2%, multi-session 22.2%, temporal 7.4%. |
+| p2 | Date injection into atom content | 19.0% | Helped some direct categories but regressed overall; content pollution. Reverted. |
+| p3 | Question-type-aware selection prompt | 18.0% | Prompt-only benchmark patch regressed overall. Reverted. |
+| p4 | HyDE expansion | skipped | BM25 + hallucinated vocabulary produced wrong retrieval; better suited for dense retrieval. |
+| p5 | Generated questions per atom | 16.0% | Generated questions polluted BM25 with false-positive matches. Reverted. |
+| p6 | Adaptive paragraph chunking | 22.0% | Helped some user-fact extraction but hurt cross-paragraph/coreference cases. Keep only as motivation for source-aware segmentation. |
+
+## Category Tracker
 
 | Category | baseline | p1 | p2 | p3 | p5 | p6 |
-|---|---|---|---|---|---|---|
-| **overall** | 15.0% | 23.8% | 19.0% | 18.0% | 16.0% | 22.0% |
-| **task-avg** | — | 25.2% | 23.1% | 20.1% | 18.2% | — |
-| single-session-user | — | 35.7% | 42.9% | 35.7% | 14.3% | 42.9% |
-| single-session-preference | — | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% |
-| single-session-assistant | — | 54.5% | 54.5% | 36.4% | 54.5% | 36.4% |
-| multi-session | — | 22.2% | 3.7% | 11.1% | 7.4% | 14.8% |
-| temporal-reasoning | — | 7.4% | 0.0% | 0.0% | 7.7% | 7.7% |
-| knowledge-update | — | 31.3% | 37.5% | 37.5% | 25.0% | 37.5% |
-| abstention | — | 28.6% | 0.0% | 28.6% | 42.9% | — |
+| --- | --- | --- | --- | --- | --- | --- |
+| overall | 15.0% | 23.8% | 19.0% | 18.0% | 16.0% | 22.0% |
+| task-avg | - | 25.2% | 23.1% | 20.1% | 18.2% | - |
+| single-session-user | - | 35.7% | 42.9% | 35.7% | 14.3% | 42.9% |
+| single-session-preference | - | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% |
+| single-session-assistant | - | 54.5% | 54.5% | 36.4% | 54.5% | 36.4% |
+| multi-session | - | 22.2% | 3.7% | 11.1% | 7.4% | 14.8% |
+| temporal-reasoning | - | 7.4% | 0.0% | 0.0% | 7.7% | 7.7% |
+| knowledge-update | - | 31.3% | 37.5% | 37.5% | 25.0% | 37.5% |
+| abstention | - | 28.6% | 0.0% | 28.6% | 42.9% | - |

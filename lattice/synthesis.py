@@ -46,7 +46,11 @@ def synthesize(query: str, atoms: list[dict]) -> SynthesisResult:
         )
 
     atoms_text = "\n\n".join(
-        f"[{a['subject']} / {a['kind']} / valid_from={a.get('valid_from', 'null')}]\n{a['content']}"
+        (
+            f"[{a['subject']} / {a['kind']} / valid_from={a.get('valid_from', 'null')} "
+            f"/ observed_at={a.get('observed_at', 'null')} / source={a.get('source_title') or a.get('source_id') or a.get('source')}]\n"
+            f"{a['content']}"
+        )
         for a in atoms
     )
     messages = [

@@ -1,11 +1,11 @@
 # Evaluation Harness
 
-Runs lattice-mcp against the [LongMemEval](https://github.com/xiaowu0162/LongMemEval) benchmark. Uses `longmemeval_oracle.json` (evidence sessions only) as a ceiling check on ingest + synthesis quality.
+Runs lattice-mcp against the [LongMemEval](https://github.com/xiaowu0162/LongMemEval) benchmark. This is a yardstick for long-memory pressure, not the product target. Benchmark-specific code lives under `lattice/eval/` and should not drive core product architecture.
 
 ## Prerequisites
 
-- RunPod pod with RTX 4090 (24GB VRAM)
-- Ollama installed and running
+- A local machine or remote box capable of running your chosen inference/judge models
+- Ollama installed and running, if using local models
 - LongMemEval repo cloned (for dataset + scorer scripts)
 - lattice-mcp repo cloned
 
@@ -51,7 +51,7 @@ Everything else in `.env.eval` can stay as-is for a standard run.
 uv run python -m lattice.eval.run_eval
 ```
 
-Runs 100 stratified questions through the lattice pipeline, then scores with `qwen2.5:14b` as judge. Prints accuracy by question type at the end.
+Runs 100 stratified questions through the lattice pipeline, then scores with the configured judge model. Prints accuracy by question type at the end.
 
 ### Inference only
 
@@ -97,6 +97,8 @@ When a question is answered wrong, the debug file tells you where the pipeline b
 | `atoms_created: 0` | Ingest extraction failed (model returned malformed JSON) |
 | Correct atoms exist but not in `atoms_selected` | Retrieval failure (BM25 or LLM re-rank missed them) |
 | Correct atoms in `atoms_selected`, wrong answer | Synthesis failure |
+
+When a benchmark idea improves one category but makes the product worse (for example by polluting atom content or adding latency-heavy control flow), keep it in eval notes instead of the active product roadmap.
 
 ```bash
 # Quick failure breakdown
