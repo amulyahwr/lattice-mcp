@@ -88,6 +88,14 @@ Read result:
 
 Set `--top-k 50` to test if selection improves with wider candidate pool. Debug rows include `retrieval_mode`, `top_k`, `bm25_candidates`, and `selected_atoms`.
 
+To keep ingest identical across variants, use the variant runner with `--reuse-ingest`:
+
+```bash
+uv run python -m lattice.eval.run_parallel_eval --priority p3 --reuse-ingest
+```
+
+This materializes atoms once, then runs `select`, `bm25`, and `all` against the same per-question lattice dirs.
+
 ### Judge only (inference already done)
 
 ```bash

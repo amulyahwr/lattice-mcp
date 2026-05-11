@@ -10,6 +10,7 @@ Usage:
     python -m lattice.eval.run_eval --keep-lattice-dirs         # keep per-question atom dirs
     python -m lattice.eval.run_eval --retrieval-mode bm25       # bypass LLM selection
     python -m lattice.eval.run_eval --retrieval-mode all        # bypass retrieval; synthesize over all atoms
+    python -m lattice.eval.run_eval --reuse-lattice-root results/p3-select/run.lattices
 
     # stdout + stderr are tee'd to a log file automatically:
     python -m lattice.eval.run_eval --phase inference
@@ -164,6 +165,8 @@ def _load_config(args: argparse.Namespace) -> dict:
         or os.environ.get("PRINT_RETRIEVAL_SCRIPT", ""),
         "keep_lattice_dirs": args.keep_lattice_dirs
         or os.environ.get("KEEP_LATTICE_EVAL_DIRS", "").lower() in {"1", "true", "yes"},
+        "reuse_lattice_root": args.reuse_lattice_root
+        or os.environ.get("REUSE_LATTICE_ROOT", ""),
     }
     return cfg
 
@@ -265,9 +268,12 @@ def _run_inference(cfg: dict) -> None:
     out_path = Path(cfg["out"])
     debug_path = out_path.with_suffix("").with_name(out_path.stem + ".debug.jsonl")
     lattice_root = out_path.with_suffix("").with_name(out_path.stem + ".lattices")
+    reuse_lattice_root = Path(cfg["reuse_lattice_root"]) if cfg["reuse_lattice_root"] else None
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if cfg["keep_lattice_dirs"]:
         lattice_root.mkdir(parents=True, exist_ok=True)
+    if reuse_lattice_root and not reuse_lattice_root.exists():
+        raise FileNotFoundError(f"reuse lattice root not found: {reuse_lattice_root}")
 
     os.environ["LLM_PROVIDER"] = cfg["llm_provider"]
     os.environ["LLM_MODEL"] = cfg["llm_model"]
@@ -301,7 +307,11 @@ def _run_inference(cfg: dict) -> None:
             qtype = item["question_type"]
             pbar.set_description(qtype[:24])
 
-            if cfg["keep_lattice_dirs"]:
+            if reuse_lattice_root:
+                tmpdir = str(reuse_lattice_root / qid)
+                if not Path(tmpdir).exists():
+                    raise FileNotFoundError(f"missing reused lattice dir for {qid}: {tmpdir}")
+            elif cfg["keep_lattice_dirs"]:
                 tmpdir = str(lattice_root / qid)
                 shutil.rmtree(tmpdir, ignore_errors=True)
                 Path(tmpdir).mkdir(parents=True, exist_ok=True)
@@ -321,27 +331,31 @@ def _run_inference(cfg: dict) -> None:
                 ingest_results: list[dict] = []
                 all_atoms: list[dict] = []
 
-                for session, sid, ts in zip(sessions, session_ids, dates):
-                    text = format_session(session, sid, ts)
-                    ingest_result = ingest(
-                        text,
-                        metadata={"source": "conversation", "date": ts, "session_id": sid},
-                        db=db,
-                    )
-                    atoms_created += ingest_result["atoms_created"]
-                    duplicates_skipped += ingest_result.get("duplicates_skipped", 0)
-                    ingest_results.append(
-                        {
-                            "session_id": sid,
-                            "date": ts,
-                            "source_id": ingest_result.get("source_id"),
-                            "segments_processed": ingest_result.get("segments_processed"),
-                            "atoms_created": ingest_result.get("atoms_created"),
-                            "atom_ids": ingest_result.get("atom_ids", []),
-                            "duplicates_skipped": ingest_result.get("duplicates_skipped", 0),
-                            "duplicate_atom_ids": ingest_result.get("duplicate_atom_ids", []),
-                        }
-                    )
+                if reuse_lattice_root:
+                    db.preload()
+                    atoms_created = len(db.all())
+                else:
+                    for session, sid, ts in zip(sessions, session_ids, dates):
+                        text = format_session(session, sid, ts)
+                        ingest_result = ingest(
+                            text,
+                            metadata={"source": "conversation", "date": ts, "session_id": sid},
+                            db=db,
+                        )
+                        atoms_created += ingest_result["atoms_created"]
+                        duplicates_skipped += ingest_result.get("duplicates_skipped", 0)
+                        ingest_results.append(
+                            {
+                                "session_id": sid,
+                                "date": ts,
+                                "source_id": ingest_result.get("source_id"),
+                                "segments_processed": ingest_result.get("segments_processed"),
+                                "atoms_created": ingest_result.get("atoms_created"),
+                                "atom_ids": ingest_result.get("atom_ids", []),
+                                "duplicates_skipped": ingest_result.get("duplicates_skipped", 0),
+                                "duplicate_atom_ids": ingest_result.get("duplicate_atom_ids", []),
+                            }
+                        )
 
                 question_date_str: str | None = item.get("question_date")
                 as_of: date | None = None
@@ -393,7 +407,9 @@ def _run_inference(cfg: dict) -> None:
                             "question_id": qid,
                             "question_type": qtype,
                             "lattice_dir": tmpdir,
-                            "lattice_dir_kept": bool(cfg["keep_lattice_dirs"]),
+                            "lattice_dir_kept": bool(cfg["keep_lattice_dirs"] or reuse_lattice_root),
+                            "atoms_reused": bool(reuse_lattice_root),
+                            "reuse_lattice_root": str(reuse_lattice_root) if reuse_lattice_root else None,
                             "sessions_ingested": len(sessions),
                             "retrieval_mode": cfg["retrieval_mode"],
                             "top_k": cfg["top_k"],
@@ -429,7 +445,7 @@ def _run_inference(cfg: dict) -> None:
                 n_err += 1
 
             finally:
-                if not cfg["keep_lattice_dirs"]:
+                if not cfg["keep_lattice_dirs"] and not reuse_lattice_root:
                     shutil.rmtree(tmpdir, ignore_errors=True)
 
             pbar.update(1)
@@ -438,13 +454,15 @@ def _run_inference(cfg: dict) -> None:
     print(f"  Processed : {n_done}")
     print(f"  Errors    : {n_err}")
     print(f"  Retrieval : {cfg['retrieval_mode']} (top_k={cfg['top_k']})")
+    if reuse_lattice_root:
+        print(f"  Reuse DBs : {reuse_lattice_root}")
     if n_done:
         print(f"  Avg atoms created  : {atoms_created_total / n_done:.1f}")
         print(f"  Avg BM25 candidates: {bm25_candidates_total / n_done:.1f}")
         print(f"  Avg atoms selected : {atoms_selected_total / n_done:.1f}")
     print(f"  Results   : {out_path}")
     print(f"  Debug     : {debug_path}")
-    if cfg["keep_lattice_dirs"]:
+    if cfg["keep_lattice_dirs"] and not reuse_lattice_root:
         print(f"  Lattices  : {lattice_root}")
 
     ollama_host = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
@@ -561,6 +579,11 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Keep per-question LatticeDB directories so atom markdown files can be inspected.",
     )
+    p.add_argument(
+        "--reuse-lattice-root",
+        default="",
+        help="Reuse per-question lattice dirs from a previous --keep-lattice-dirs run; skips ingest.",
+    )
     return p.parse_args()
 
 
@@ -582,6 +605,7 @@ def main() -> None:
         print(f"Judge    : {cfg['judge_model']}")
         print(f"Dataset  : {Path(cfg['dataset']).stem}")
         print(f"Retrieve : {cfg['retrieval_mode']} (top_k={cfg['top_k']})")
+        print(f"Reuse DBs: {cfg['reuse_lattice_root'] or '(none)'}")
         print(f"Out      : {cfg['out']}")
         print(f"Log      : {log_path}")
         print(f"Keep DBs : {cfg['keep_lattice_dirs']}")
