@@ -7,7 +7,6 @@ dependencies = [
     "backoff>=2.2.1",
     "litellm>=1.83.14",
     "mcp>=1.27.1",
-    "mlflow>=3.12.0",
     "pydantic>=2.12.5",
     "python-frontmatter>=1.1.0",
     "rank-bm25>=0.2.2",
@@ -26,8 +25,9 @@ packages = ["lattice", "server.py"]
 [dependency-groups]
 dev = ["pytest>=8"]
 eval = [
-    "mlflow>=2.0",
     "python-dotenv>=1.0",
     "tqdm>=4.0",
     "requests>=2.0",
+    "streamlit>=1.35",
+    "pandas>=2.0",
 ]

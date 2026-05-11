@@ -18,6 +18,9 @@ Usage:
     #   run_<llm>_<judge>_<dataset>_<phase>.log
     # e.g.: results/gemma4e4b_qwen2514b_longmemeval_oracle_inference.jsonl
 
+    # Debug viewer — browse results by question, failure mode, atoms:
+    uv run streamlit run lattice/eval/debug_viewer.py
+
 Defaults (overridable via CLI flags or env vars in .env.eval):
     dataset  : lattice/eval/data/longmemeval_oracle.json
     out      : results/<model-slug>_baseline.jsonl  (auto-derived from LLM_MODEL)
@@ -25,15 +28,6 @@ Defaults (overridable via CLI flags or env vars in .env.eval):
     seed     : 42
 
 Required env vars (set in .env.eval): LLM_PROVIDER, LLM_MODEL, LLM_API_KEY (non-ollama).
-
-MLflow tracing:
-    Traces written to mlflow.db (project root) via SQLite — no server needed.
-    Each question is a span; litellm autolog captures every LLM call inside it
-    (inputs, outputs, token counts, latency).
-
-    View traces:
-        mlflow ui --backend-store-uri sqlite:////workspace/lattice-mcp/mlflow.db --port 5001
-    (startup.sh launches this automatically on pod start)
 """
 
 from __future__ import annotations
@@ -51,7 +45,6 @@ from collections import Counter
 from datetime import date
 from pathlib import Path
 
-import mlflow
 import requests
 from dotenv import load_dotenv
 from tqdm import tqdm
@@ -207,11 +200,6 @@ def _run_inference(cfg: dict) -> None:
     os.environ["LLM_PROVIDER"] = cfg["llm_provider"]
     os.environ["LLM_MODEL"] = cfg["llm_model"]
 
-    _mlflow_db = Path(__file__).parent.parent.parent / "mlflow.db"
-    mlflow.set_tracking_uri(f"sqlite:///{_mlflow_db}")
-    mlflow.set_experiment(Path(cfg["out"]).stem)
-    mlflow.litellm.autolog()
-
     print(f"Loading dataset: {cfg['dataset']}")
     with open(cfg["dataset"]) as f:
         data = json.load(f)
@@ -243,88 +231,72 @@ def _run_inference(cfg: dict) -> None:
 
             tmpdir = tempfile.mkdtemp(prefix="lattice-eval-")
             try:
-                with mlflow.start_span(
-                    name=f"question/{qid}",
-                    attributes={
-                        "question_type": qtype,
-                        "model": cfg["llm_model"],
-                        "provider": cfg["llm_provider"],
-                    },
-                ) as span:
-                    db = LatticeDB(lattice_dir=tmpdir)
+                db = LatticeDB(lattice_dir=tmpdir)
 
-                    sessions = item.get("haystack_sessions", [])
-                    session_ids = item.get(
-                        "haystack_session_ids", [f"s{i}" for i in range(len(sessions))]
+                sessions = item.get("haystack_sessions", [])
+                session_ids = item.get(
+                    "haystack_session_ids", [f"s{i}" for i in range(len(sessions))]
+                )
+                dates = item.get("haystack_dates", ["" for _ in sessions])
+
+                atoms_created = 0
+                all_atoms: list[dict] = []
+
+                for session, sid, ts in zip(sessions, session_ids, dates):
+                    text = format_session(session, sid, ts)
+                    ingest_result = ingest(
+                        text,
+                        metadata={"source": "conversation", "date": ts},
+                        db=db,
                     )
-                    dates = item.get("haystack_dates", ["" for _ in sessions])
+                    atoms_created += ingest_result["atoms_created"]
 
-                    atoms_created = 0
-                    all_atoms: list[dict] = []
+                question_date_str: str | None = item.get("question_date")
+                as_of: date | None = None
+                if question_date_str:
+                    try:
+                        as_of = date.fromisoformat(question_date_str[:10])
+                    except ValueError:
+                        pass
 
-                    for session, sid, ts in zip(sessions, session_ids, dates):
-                        text = format_session(session, sid, ts)
-                        ingest_result = ingest(
-                            text,
-                            metadata={"source": "conversation", "date": ts},
-                            db=db,
-                        )
-                        atoms_created += ingest_result["atoms_created"]
+                selected = select(item["question"], as_of=as_of, db=db)
+                synthesis = synthesize(item["question"], selected)
 
-                    question_date_str: str | None = item.get("question_date")
-                    as_of: date | None = None
-                    if question_date_str:
-                        try:
-                            as_of = date.fromisoformat(question_date_str[:10])
-                        except ValueError:
-                            pass
+                all_atoms = [
+                    {
+                        "atom_id": a.atom_id,
+                        "subject": a.subject,
+                        "content": a.content[:120],
+                    }
+                    for a in db.all()
+                ]
 
-                    selected = select(item["question"], as_of=as_of, db=db)
-                    synthesis = synthesize(item["question"], selected)
+                out_f.write(
+                    json.dumps({"question_id": qid, "hypothesis": synthesis.answer})
+                    + "\n"
+                )
+                out_f.flush()
 
-                    # collect atom details for debug log
-                    all_atoms = [
+                dbg_f.write(
+                    json.dumps(
                         {
-                            "atom_id": a.atom_id,
-                            "subject": a.subject,
-                            "content": a.content[:120],
-                        }
-                        for a in db.all()
-                    ]
-
-                    span.set_attributes(
-                        {
+                            "question_id": qid,
+                            "question_type": qtype,
+                            "sessions_ingested": len(sessions),
                             "atoms_created": atoms_created,
-                            "atoms_selected": len(selected),
+                            "atoms": all_atoms,
+                            "atoms_selected": [a["atom_id"] for a in selected],
+                            "synthesis_raw": synthesis.raw_response,
+                            "hypothesis": synthesis.answer,
                         }
                     )
+                    + "\n"
+                )
+                dbg_f.flush()
 
-                    out_f.write(
-                        json.dumps({"question_id": qid, "hypothesis": synthesis.answer})
-                        + "\n"
-                    )
-                    out_f.flush()
-
-                    dbg_f.write(
-                        json.dumps(
-                            {
-                                "question_id": qid,
-                                "question_type": qtype,
-                                "sessions_ingested": len(sessions),
-                                "atoms_created": atoms_created,
-                                "atoms": all_atoms,
-                                "atoms_selected": [a["atom_id"] for a in selected],
-                                "synthesis_raw": synthesis.raw_response,
-                                "hypothesis": synthesis.answer,
-                            }
-                        )
-                        + "\n"
-                    )
-                    dbg_f.flush()
-
-                    atoms_created_total += atoms_created
-                    atoms_selected_total += len(selected)
-                    n_done += 1
+                atoms_created_total += atoms_created
+                atoms_selected_total += len(selected)
+                n_done += 1
 
             except Exception as exc:
                 out_f.write(

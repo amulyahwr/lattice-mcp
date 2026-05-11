@@ -22,8 +22,20 @@ def db(tmp_path):
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
+def _subjects_response(subjects: list[str]) -> str:
+    return json.dumps({"subjects": subjects})
+
+
 def _ingest_response(atoms: list[dict]) -> str:
     return json.dumps({"atoms": atoms})
+
+
+def _questions_response(questions: list[str] | None = None) -> str:
+    return json.dumps({"questions": questions or ["What is this about?"]})
+
+
+def _supersession_response(atom_id: str | None) -> str:
+    return json.dumps({"superseded_atom_id": atom_id})
 
 
 def _select_response(atom_ids: list[str]) -> str:
@@ -38,9 +50,8 @@ class TestIngest:
             {"subject": "lattice-mcp", "kind": "fact", "source": "user",
              "content": "lattice-mcp is a local MCP server.", "valid_from": None, "valid_until": None},
         ]
-        # supersession check returns null (no supersession)
-        responses = [_ingest_response(llm_atoms), "null"]
-        with patch("lattice.ingest.complete", side_effect=responses):
+        # extract_atoms (no supersession: first atom for this subject)
+        with patch("lattice.ingest.complete", side_effect=[_ingest_response(llm_atoms)]):
             result = ingest("lattice-mcp is a local MCP server.", db=db)
 
         assert result["atoms_created"] == 1
@@ -54,8 +65,7 @@ class TestIngest:
             {"subject": "Project", "kind": "doc", "source": "document",
              "content": "Project readme.", "valid_from": None, "valid_until": None},
         ]
-        responses = [_ingest_response(llm_atoms), "null"]
-        with patch("lattice.ingest.complete", side_effect=responses):
+        with patch("lattice.ingest.complete", side_effect=[_ingest_response(llm_atoms)]):
             result = ingest("Project readme.", metadata={"title": "README"}, db=db)
 
         atom = db.read(result["atom_ids"][0])
@@ -66,9 +76,8 @@ class TestIngest:
             {"subject": "A", "kind": "fact", "source": "user", "content": "A is true.", "valid_from": None, "valid_until": None},
             {"subject": "B", "kind": "fact", "source": "user", "content": "B is false.", "valid_from": None, "valid_until": None},
         ]
-        # Two atoms → two supersession checks
-        responses = [_ingest_response(llm_atoms), "null", "null"]
-        with patch("lattice.ingest.complete", side_effect=responses):
+        # no supersession calls: first atoms on each subject → db.by_subject() returns []
+        with patch("lattice.ingest.complete", side_effect=[_ingest_response(llm_atoms)]):
             result = ingest("A is true. B is false.", db=db)
 
         assert result["atoms_created"] == 2
@@ -77,7 +86,7 @@ class TestIngest:
             assert aid in all_ids
 
     def test_supersession_links_atoms(self, db):
-        # First ingest: create old atom
+        # First ingest: create old atom (no supersession: no existing atoms for "API")
         old_atoms = [
             {"subject": "API", "kind": "fact", "source": "user",
              "content": "The API uses REST.", "valid_from": None, "valid_until": None},
@@ -87,13 +96,15 @@ class TestIngest:
 
         old_id = old_result["atom_ids"][0]
 
-        # Second ingest: supersedes old atom
+        # Second ingest: supersedes old atom (fast path: subject in registry → LLM call)
         new_atoms = [
             {"subject": "API", "kind": "fact", "source": "user",
              "content": "The API now uses GraphQL.", "valid_from": None, "valid_until": None},
         ]
-        # supersession check returns the old atom's id
-        with patch("lattice.ingest.complete", side_effect=[_ingest_response(new_atoms), old_id]):
+        with patch("lattice.ingest.complete", side_effect=[
+            _ingest_response(new_atoms),
+            _supersession_response(old_id),
+        ]):
             new_result = ingest("The API now uses GraphQL.", db=db)
 
         new_id = new_result["atom_ids"][0]
@@ -109,8 +120,7 @@ class TestIngest:
             {"subject": "Offer", "kind": "event", "source": "user",
              "content": "Special offer.", "valid_from": "2024-06-01", "valid_until": "2024-06-30"},
         ]
-        responses = [_ingest_response(llm_atoms), "null"]
-        with patch("lattice.ingest.complete", side_effect=responses):
+        with patch("lattice.ingest.complete", side_effect=[_ingest_response(llm_atoms)]):
             result = ingest("Special offer valid June 2024.", db=db)
 
         atom = db.read(result["atom_ids"][0])

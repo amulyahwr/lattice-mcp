@@ -37,7 +37,7 @@ Methodology: implement one priority → full 100q eval → measure delta → dec
 | p3 | Question-type-aware selection (temporal-only) | 18.0% | task-avg 20.1% · temporal 0.0% · regression vs p1 — reverted |
 | p4 | HyDE expansion | skipped | BM25 + hallucinated vocab = wrong atom retrieval; HyDE suited for dense/embedding retrieval only |
 | p5 | Question generation per atom | 16.0% | task-avg 18.2% · multi-session 7.4% · temporal 7.7% · regression vs p1 — reverted |
-| p6 | Adaptive chunking | — | |
+| p6 | Adaptive chunking | 22.0% | multi-session 14.8% · single-session-assistant 36.4% · regression vs p1 (-1.8pp). Root cause: paragraph chunking splits cross-paragraph references, losing coreference context across chunks. Kept in code (useful for truly long sources); needs smarter boundary detection (e.g. overlap or sentence-level) to avoid context loss |
 | p7 | Selection tool calling + fallback | — | |
 | p8 | Atom deduplication | — | |
 | p9 | Multi-pass retrieval | — | |
@@ -48,14 +48,14 @@ Methodology: implement one priority → full 100q eval → measure delta → dec
 
 ## Per-category tracker
 
-| Category | baseline | p1 | p2 | p3 | p5 |
-|---|---|---|---|---|---|
-| **overall** | 15.0% | 23.8% | 19.0% | 18.0% | 16.0% |
-| **task-avg** | — | 25.2% | 23.1% | 20.1% | 18.2% |
-| single-session-user | — | 35.7% | 42.9% | 35.7% | 14.3% |
-| single-session-preference | — | 0.0% | 0.0% | 0.0% | 0.0% |
-| single-session-assistant | — | 54.5% | 54.5% | 36.4% | 54.5% |
-| multi-session | — | 22.2% | 3.7% | 11.1% | 7.4% |
-| temporal-reasoning | — | 7.4% | 0.0% | 0.0% | 7.7% |
-| knowledge-update | — | 31.3% | 37.5% | 37.5% | 25.0% |
-| abstention | — | 28.6% | 0.0% | 28.6% | 42.9% |
+| Category | baseline | p1 | p2 | p3 | p5 | p6 |
+|---|---|---|---|---|---|---|
+| **overall** | 15.0% | 23.8% | 19.0% | 18.0% | 16.0% | 22.0% |
+| **task-avg** | — | 25.2% | 23.1% | 20.1% | 18.2% | — |
+| single-session-user | — | 35.7% | 42.9% | 35.7% | 14.3% | 42.9% |
+| single-session-preference | — | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% |
+| single-session-assistant | — | 54.5% | 54.5% | 36.4% | 54.5% | 36.4% |
+| multi-session | — | 22.2% | 3.7% | 11.1% | 7.4% | 14.8% |
+| temporal-reasoning | — | 7.4% | 0.0% | 0.0% | 7.7% | 7.7% |
+| knowledge-update | — | 31.3% | 37.5% | 37.5% | 25.0% | 37.5% |
+| abstention | — | 28.6% | 0.0% | 28.6% | 42.9% | — |

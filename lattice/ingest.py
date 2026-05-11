@@ -25,6 +25,10 @@ class _AtomList(BaseModel):
     atoms: list[_ExtractedAtom]
 
 
+class _SupersessionResult(BaseModel):
+    superseded_atom_id: str | None
+
+
 _SYSTEM = """\
 You are a knowledge extraction agent. Read a piece of text and extract all durable facts, \
 decisions, constraints, goals, events, and preferences into discrete atoms.
@@ -49,6 +53,19 @@ or "auth system". Consistent subjects enable supersession when the same fact is 
 
 Return a JSON object with an `atoms` key containing an array of atom objects. \
 Each atom must have exactly these keys: subject, kind, source, content, valid_from, valid_until.
+"""
+
+_SUPERSESSION_SYSTEM = """\
+You are deciding whether a new fact supersedes an existing fact about the same subject. \
+Supersession means the new fact contradicts or replaces the old one — not merely adds to it.
+Return a JSON object: {"superseded_atom_id": "<atom_id>"} if superseded, or {"superseded_atom_id": null} if not.
+"""
+
+_SUPERSESSION_MULTI_SYSTEM = """\
+You are deciding whether a new fact supersedes any of the existing facts listed below. \
+Supersession means the new fact contradicts or replaces an old one — not merely adds to it.
+Return a JSON object: {"superseded_atom_id": "<atom_id>"} for the one superseded fact, \
+or {"superseded_atom_id": null} if none are superseded.
 """
 
 # ── date resolution ───────────────────────────────────────────────────────────
@@ -127,18 +144,12 @@ def _extract_atoms(text: str, metadata: dict, ref: datetime) -> list[dict]:
     for a in atoms_data:
         if source_override:
             a["source"] = source_override
-        # Resolve relative dates in content now that we have the ref datetime
         a["content"] = _resolve_dates(a["content"], ref)
         a["metadata"] = metadata
     return atoms_data
 
 
 def _detect_supersession(db: LatticeDB, new_atom: Atom) -> str | None:
-    """Return atom_id to supersede, or None.
-
-    Uses subject registry for O(1) lookup, then asks LLM only if an existing
-    active atom is found on the same subject.
-    """
     # Fast path: subject registry
     existing_id = db.lookup_subject(new_atom.subject)
     if existing_id:
@@ -150,56 +161,43 @@ def _detect_supersession(db: LatticeDB, new_atom: Atom) -> str | None:
             return None
 
         messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You are deciding whether a new fact supersedes an existing fact. "
-                    "Supersession means the new fact contradicts or replaces the old one — "
-                    "not merely adds to it. Reply with the atom_id that is superseded, or null."
-                ),
-            },
+            {"role": "system", "content": _SUPERSESSION_SYSTEM},
             {
                 "role": "user",
                 "content": (
                     f"New fact: {new_atom.content}\n\n"
-                    f"Existing fact [{existing_id}]: {existing.content}\n\n"
-                    "Reply with just the atom_id string or null."
+                    f"Existing fact [{existing_id}]: {existing.content}"
                 ),
             },
         ]
-        reply = complete(messages).strip().strip('"').strip("'")
-        if reply.lower() == "null" or not reply:
+        raw = complete(messages, text_format=_SupersessionResult)
+        superseded_id = json.loads(raw).get("superseded_atom_id")
+        if not superseded_id:
             return None
-        return existing_id if reply == existing_id else None
+        return existing_id if superseded_id == existing_id else None
 
-    # Slow path: no registry entry, scan by subject (handles hand-edited atoms)
+    # Slow path: scan by subject (handles hand-edited atoms)
     existing = [a for a in db.by_subject(new_atom.subject) if not a.is_superseded]
     if not existing:
         return None
 
     candidates_text = "\n".join(f"[{a.atom_id}] {a.content}" for a in existing)
     messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are deciding whether a new fact supersedes an existing fact. "
-                "Reply with the atom_id that is superseded, or null if none."
-            ),
-        },
+        {"role": "system", "content": _SUPERSESSION_MULTI_SYSTEM},
         {
             "role": "user",
             "content": (
                 f"New fact: {new_atom.content}\n\n"
-                f"Existing facts about '{new_atom.subject}':\n{candidates_text}\n\n"
-                "Reply with just the atom_id string or null."
+                f"Existing facts about '{new_atom.subject}':\n{candidates_text}"
             ),
         },
     ]
-    reply = complete(messages).strip().strip('"').strip("'")
-    if reply.lower() == "null" or not reply:
+    raw = complete(messages, text_format=_SupersessionResult)
+    superseded_id = json.loads(raw).get("superseded_atom_id")
+    if not superseded_id:
         return None
     valid_ids = {a.atom_id for a in existing}
-    return reply if reply in valid_ids else None
+    return superseded_id if superseded_id in valid_ids else None
 
 
 def ingest(source: str, metadata: dict | None = None, db: LatticeDB | None = None) -> dict:
@@ -228,7 +226,6 @@ def ingest(source: str, metadata: dict | None = None, db: LatticeDB | None = Non
         else:
             db.write(atom)
 
-        # Register subject → atom_id for fast future supersession lookups
         if atom.subject:
             db.register_subject(atom.subject, atom.atom_id)
 
