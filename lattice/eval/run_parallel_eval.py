@@ -43,6 +43,10 @@ class VariantResult:
     judge_rc: int | None = None
     n: int | None = None
     accuracy: float | None = None
+    session_n: int | None = None
+    session_hit: float | None = None
+    session_recall: float | None = None
+    session_mrr: float | None = None
     out_path: Path | None = None
     log_path: Path | None = None
 
@@ -303,6 +307,38 @@ def _parse_eval_results(out_path: Path, judge_model: str) -> dict | None:
     return None
 
 
+def _debug_path_for_out(out_path: Path) -> Path:
+    return out_path.with_suffix("").with_name(out_path.stem + ".debug.jsonl")
+
+
+def _parse_retrieval_debug(out_path: Path) -> dict | None:
+    debug_path = _debug_path_for_out(out_path)
+    if not debug_path.exists():
+        return None
+
+    values = []
+    for line in debug_path.read_text().splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        selected = (row.get("retrieval_oracle") or {}).get("selected") or {}
+        if selected.get("session_hit") is None:
+            continue
+        values.append(selected)
+
+    if not values:
+        return None
+    return {
+        "session_n": len(values),
+        "session_hit": sum(1.0 if v.get("session_hit") else 0.0 for v in values)
+        / len(values),
+        "session_recall": sum(float(v.get("session_recall") or 0.0) for v in values)
+        / len(values),
+        "session_mrr": sum(float(v.get("session_mrr") or 0.0) for v in values)
+        / len(values),
+    }
+
+
 def _attach_scores(results: dict[str, VariantResult], cfg: dict) -> None:
     for result in results.values():
         if result.out_path is None:
@@ -310,16 +346,25 @@ def _attach_scores(results: dict[str, VariantResult], cfg: dict) -> None:
                 cfg["llm_model"], cfg["dataset"], result.priority, result.variant
             )
         scores = _parse_eval_results(result.out_path, cfg["judge_model"])
-        if not scores:
-            continue
-        result.n = scores["n"]
-        result.accuracy = scores["accuracy"]
+        if scores:
+            result.n = scores["n"]
+            result.accuracy = scores["accuracy"]
+
+        retrieval = _parse_retrieval_debug(result.out_path)
+        if retrieval:
+            result.session_n = retrieval["session_n"]
+            result.session_hit = retrieval["session_hit"]
+            result.session_recall = retrieval["session_recall"]
+            result.session_mrr = retrieval["session_mrr"]
 
 
 def _print_summary(results: dict[str, VariantResult]) -> None:
-    print("\n" + "=" * 86)
-    print(f"{'Variant':<10} {'Priority':<14} {'Infer':>7} {'Judge':>7} {'N':>5} {'Accuracy':>10}  Output")
-    print("-" * 86)
+    print("\n" + "=" * 118)
+    print(
+        f"{'Variant':<10} {'Priority':<14} {'Infer':>7} {'Judge':>7} "
+        f"{'N':>5} {'Accuracy':>10} {'SessHit':>9} {'SessRec':>9} {'SessMRR':>9}  Output"
+    )
+    print("-" * 118)
     for variant in _VARIANTS:
         if variant not in results:
             continue
@@ -328,8 +373,14 @@ def _print_summary(results: dict[str, VariantResult]) -> None:
         judge = "OK" if r.judge_rc == 0 else ("-" if r.judge_rc is None else "FAIL")
         n = str(r.n) if r.n is not None else "-"
         acc = f"{r.accuracy:.1%}" if r.accuracy is not None else "-"
-        print(f"{variant:<10} {r.priority:<14} {infer:>7} {judge:>7} {n:>5} {acc:>10}  {r.out_path}")
-    print("=" * 86)
+        sess_hit = f"{r.session_hit:.1%}" if r.session_hit is not None else "-"
+        sess_rec = f"{r.session_recall:.3f}" if r.session_recall is not None else "-"
+        sess_mrr = f"{r.session_mrr:.3f}" if r.session_mrr is not None else "-"
+        print(
+            f"{variant:<10} {r.priority:<14} {infer:>7} {judge:>7} {n:>5} "
+            f"{acc:>10} {sess_hit:>9} {sess_rec:>9} {sess_mrr:>9}  {r.out_path}"
+        )
+    print("=" * 118)
 
     ranked = [r for r in results.values() if r.accuracy is not None]
     if len(ranked) >= 2:

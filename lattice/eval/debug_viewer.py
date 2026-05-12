@@ -94,6 +94,14 @@ def _source_session(atom: dict) -> str | None:
     return prov.get("session_id") or atom.get("session_id")
 
 
+def _selected_session_metrics(d: dict) -> dict:
+    return ((d.get("retrieval_oracle") or {}).get("selected") or {})
+
+
+def _bm25_session_metrics(d: dict) -> dict:
+    return ((d.get("retrieval_oracle") or {}).get("bm25") or {})
+
+
 def _atom_file(lattice_dir: str | None, atom_id: str) -> Path | None:
     if not lattice_dir:
         return None
@@ -166,6 +174,7 @@ for qid, d in debug.items():
     ds = dataset.get(qid, {})
     label = labels.get(qid)
     failure = _failure_type(d, label)
+    selected_oracle = _selected_session_metrics(d)
     rows.append(
         {
             "qid": qid,
@@ -177,6 +186,9 @@ for qid, d in debug.items():
             "sel↑": len(d.get("atoms_selected", [])),
             "dupes": d.get("duplicates_skipped", 0),
             "sessions": d.get("sessions_ingested", 0),
+            "sess_hit": selected_oracle.get("session_hit"),
+            "sess_rec": selected_oracle.get("session_recall"),
+            "sess_mrr": selected_oracle.get("session_mrr"),
             "mode": d.get("retrieval_mode", "select"),
             "kept": "yes" if d.get("lattice_dir_kept") else "",
             "question": ds.get("question", "")[:70],
@@ -242,6 +254,13 @@ c4.metric("✗ Wrong", int(wrong_n))
 c5.metric("Avg atoms↑", f"{df['atoms↑'].mean():.1f}" if len(df) else "—")
 c6.metric("Avg BM25↑", f"{df['bm25↑'].mean():.1f}" if len(df) else "—")
 
+session_df = df[df["sess_hit"].notna()]
+if len(session_df):
+    s1, s2, s3 = st.columns(3)
+    s1.metric("Session hit", f"{session_df['sess_hit'].mean():.1%}")
+    s2.metric("Session recall", f"{session_df['sess_rec'].mean():.3f}")
+    s3.metric("Session MRR", f"{session_df['sess_mrr'].mean():.3f}")
+
 # failure breakdown bar chart
 wrong_df = df[df["✓/✗"] == "✗"]
 if len(wrong_df):
@@ -263,6 +282,8 @@ if len(wrong_df):
                 atoms=("atoms↑", "mean"),
                 bm25=("bm25↑", "mean"),
                 selected=("sel↑", "mean"),
+                session_hit=("sess_hit", "mean"),
+                session_recall=("sess_rec", "mean"),
             )
             .reset_index()
             .sort_values("accuracy")
@@ -299,6 +320,9 @@ display_cols = [
     "sel↑",
     "dupes",
     "sessions",
+    "sess_hit",
+    "sess_rec",
+    "sess_mrr",
     "kept",
     "question",
 ]
@@ -372,6 +396,34 @@ with tab_summary:
     if d.get("lattice_dir"):
         st.markdown("**Lattice dir**")
         st.code(d["lattice_dir"])
+
+    retrieval_oracle = d.get("retrieval_oracle") or {}
+    if retrieval_oracle:
+        st.markdown("**Session retrieval oracle**")
+        oracle_rows = []
+        for mode in ("bm25", "selected"):
+            metrics = retrieval_oracle.get(mode) or {}
+            oracle_rows.append(
+                {
+                    "mode": mode,
+                    "hit": metrics.get("session_hit"),
+                    "recall": metrics.get("session_recall"),
+                    "precision": metrics.get("session_precision"),
+                    "mrr": metrics.get("session_mrr"),
+                    "gold_reached": ", ".join(
+                        metrics.get("retrieved_gold_session_ids") or []
+                    ),
+                    "gold_missing": ", ".join(
+                        metrics.get("missing_gold_session_ids") or []
+                    ),
+                }
+            )
+        st.dataframe(pd.DataFrame(oracle_rows), use_container_width=True)
+
+    answer_oracle = d.get("answer_oracle") or {}
+    if answer_oracle:
+        st.markdown("**Answer oracle**")
+        st.json(answer_oracle)
 
     if d.get("ingest_results"):
         st.markdown("**Ingest results by session**")
@@ -484,13 +536,28 @@ with tab_sessions:
     sessions = ds.get("haystack_sessions", [])
     session_ids = ds.get("haystack_session_ids", [f"s{i}" for i in range(len(sessions))])
     dates = ds.get("haystack_dates", ["" for _ in sessions])
+    gold_sessions = set((d.get("answer_oracle") or {}).get("answer_session_ids") or ds.get("answer_session_ids") or [])
+    selected_gold_sessions = set(
+        _selected_session_metrics(d).get("retrieved_gold_session_ids") or []
+    )
+    bm25_gold_sessions = set(_bm25_session_metrics(d).get("retrieved_gold_session_ids") or [])
 
     for sess, sid, ts in zip(sessions, session_ids, dates):
-        with st.expander(f"Session {sid} · {ts}", expanded=False):
-            for turn in sess:
+        labels = []
+        if sid in gold_sessions:
+            labels.append("gold")
+        if sid in bm25_gold_sessions:
+            labels.append("bm25")
+        if sid in selected_gold_sessions:
+            labels.append("selected")
+        label_text = f" · {', '.join(labels)}" if labels else ""
+        with st.expander(f"Session {sid} · {ts}{label_text}", expanded=False):
+            for idx, turn in enumerate(sess):
                 role = turn.get("role", "?")
                 content = str(turn.get("content", ""))
-                st.markdown(f"**{role}**")
+                has_answer = turn.get("has_answer")
+                suffix = " · has_answer" if has_answer is True else ""
+                st.markdown(f"**{idx}. {role}{suffix}**")
                 st.write(content)
                 st.divider()
 

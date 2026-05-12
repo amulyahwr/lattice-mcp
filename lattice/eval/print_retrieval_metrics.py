@@ -1,66 +1,73 @@
-import sys
+from __future__ import annotations
+
+import argparse
 import json
-import numpy as np
+from collections import defaultdict
+from pathlib import Path
 
-if len(sys.argv) != 2:
-    print("Usage: python print_retrieval_metrics.py in_file")
-    exit()
 
-in_file = sys.argv[1]
-in_data = [json.loads(line) for line in open(in_file).readlines()]
-in_data = [x for x in in_data if "_abs" not in x["question_id"]]
+def _mean(values: list[float]) -> float | None:
+    return sum(values) / len(values) if values else None
 
-task2type = {
-    "single_hop": "single_needle",
-    "assistant_previnfo": "single_needle",
-    "two_hop": "multi_session_synthesis",
-    "multi_session_synthesis": "multi_session_synthesis",
-    "knowledge_update": "knowledge_update",
-    "temp_reasoning_explicit": "temporal_reasoning",
-    "temp_reasoning_implicit": "temporal_reasoning",
-    "implicit_preference_v2": "implicit_preference_v2",
-}
-type2acc = {t: [] for t in set(list(task2type.values()))}
 
-all_metrics = []
-for entry in in_data:
-    all_metrics.append(entry["retrieval_results"]["metrics"])
+def _fmt(value: float | None) -> str:
+    return "-" if value is None else f"{value:.3f}"
 
-sess_metric_names = ["recall_all@5", "ndcg_any@5", "recall_all@10", "ndcg_any@10"]
-print("Session-level metrics:")
-try:
+
+def _metrics_for(rows: list[dict], mode: str) -> dict:
+    values = []
+    for row in rows:
+        oracle = (row.get("retrieval_oracle") or {}).get(mode) or {}
+        if oracle.get("session_hit") is None:
+            continue
+        values.append(oracle)
+
+    return {
+        "n": len(values),
+        "hit": _mean([1.0 if v.get("session_hit") else 0.0 for v in values]),
+        "recall": _mean([float(v.get("session_recall") or 0.0) for v in values]),
+        "precision": _mean([float(v.get("session_precision") or 0.0) for v in values]),
+        "mrr": _mean([float(v.get("session_mrr") or 0.0) for v in values]),
+    }
+
+
+def _print_table(title: str, groups: dict[str, list[dict]]) -> None:
+    print(title)
     print(
-        ", ".join(
-            [
-                "\t{} = {}".format(
-                    name, round(np.mean([x["session"][name] for x in all_metrics]), 4)
-                )
-                for name in sess_metric_names
-            ]
-        )
+        f"{'Group':<28} {'Mode':<9} {'N':>5} {'Hit':>8} {'Recall':>8} "
+        f"{'Prec':>8} {'MRR':>8}"
     )
-except:
-    pass
+    print("-" * 82)
+    for group, rows in groups.items():
+        for mode in ("bm25", "selected"):
+            metrics = _metrics_for(rows, mode)
+            print(
+                f"{group:<28} {mode:<9} {metrics['n']:>5} "
+                f"{_fmt(metrics['hit']):>8} {_fmt(metrics['recall']):>8} "
+                f"{_fmt(metrics['precision']):>8} {_fmt(metrics['mrr']):>8}"
+            )
+    print()
 
-turn_metric_names = [
-    "recall_all@5",
-    "ndcg_any@5",
-    "recall_all@10",
-    "ndcg_any@10",
-    "recall_all@50",
-    "ndcg_any@50",
-]
-print("Turn-level metrics:")
-try:
-    print(
-        ", ".join(
-            [
-                "\t{} = {}".format(
-                    name, round(np.mean([x["turn"][name] for x in all_metrics]), 4)
-                )
-                for name in turn_metric_names
-            ]
-        )
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Print lattice session-level retrieval metrics from debug JSONL."
     )
-except:
-    pass
+    parser.add_argument("debug_file", help="Path to *.debug.jsonl from run_eval.py")
+    args = parser.parse_args()
+
+    path = Path(args.debug_file)
+    rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    rows = [row for row in rows if "_abs" not in row.get("question_id", "")]
+
+    by_type: dict[str, list[dict]] = defaultdict(list)
+    for row in rows:
+        by_type[row.get("question_type", "?")].append(row)
+
+    print(f"File: {path}")
+    _print_table("Overall", {"all": rows})
+    _print_table("By question type", dict(sorted(by_type.items())))
+
+
+if __name__ == "__main__":
+    main()

@@ -66,10 +66,10 @@ Writes `results/run1.jsonl` (hypotheses) and `results/run1.debug.jsonl` (per-que
 Use same ingest, swap retrieval mode, then compare judged accuracy and debug files:
 
 ```bash
-# Product path: BM25 candidates -> LLM selector -> synthesis
+# Product path: BM25 candidates -> selection payload -> synthesis
 uv run python -m lattice.eval.run_eval --phase inference --retrieval-mode select --priority p3-select
 
-# Selection ablation: BM25 candidates go straight to synthesis
+# BM25 ablation: BM25 candidates go straight to synthesis through the eval debug payload
 uv run python -m lattice.eval.run_eval --phase inference --retrieval-mode bm25 --priority p3-bm25
 
 # Ceiling check: all valid atoms go to synthesis
@@ -80,13 +80,15 @@ Read result:
 
 | Pattern | Meaning |
 |---|---|
-| `bm25` > `select` | LLM selector dropping useful atoms |
+| `bm25` > `select` | Selection path differs from raw BM25; check selected atom IDs and payload shape |
 | `all` > `bm25` | BM25 candidate generation weak |
 | `select`/`bm25`/`all` all bad | Ingest missing facts or synthesis/reasoning weak |
-| Correct atom in `bm25_candidates`, missing from `atoms_selected` | Selector bug |
+| Correct atom in `bm25_candidates`, missing from `atoms_selected` | Selection or pack-expansion bug |
 | Correct atom in `selected_atoms`, bad answer | Synthesis bug |
 
-Set `--top-k 50` to test if selection improves with wider candidate pool. Debug rows include `retrieval_mode`, `top_k`, `bm25_candidates`, and `selected_atoms`.
+Set `--top-k 50` to test if selection improves with wider candidate pool. Debug rows include `retrieval_mode`, `top_k`, `bm25_candidates`, `selected_atoms`, `retrieval_oracle`, and `answer_oracle`.
+
+Current `select` uses BM25 directly. Its selected atom payload is normalized to include the same provenance, dedup, and supersession fields as BM25 debug atoms, while keeping flat provenance fields for product callers. After payload normalization, `select` and `bm25` should be close; if they diverge, inspect atom IDs, ordering, and output reuse before attributing the gap to retrieval quality.
 
 To keep ingest identical across variants, use the variant runner with `--reuse-ingest`:
 
@@ -95,6 +97,25 @@ uv run python -m lattice.eval.run_parallel_eval --priority p3 --reuse-ingest
 ```
 
 This materializes atoms once, then runs `select`, `bm25`, and `all` against the same per-question lattice dirs.
+
+### Retrieval oracle diagnostics
+
+LongMemEval examples include `answer_session_ids`. The inference debug file uses those IDs to score retrieval before synthesis:
+
+| Metric | Meaning |
+|---|---|
+| session hit | At least one retrieved atom came from a gold answer session |
+| session recall | Fraction of gold answer sessions reached |
+| session precision | Fraction of retrieved atoms whose session is gold |
+| session MRR | Reciprocal rank of the first retrieved gold-session atom |
+
+The debug row stores metrics for both `bm25_candidates` and final `selected_atoms` under `retrieval_oracle`. It also stores `answer_oracle` with `has_answer` turn counts and previews. Local oracle/S/M datasets all include `answer_session_ids`; `has_answer` appears on gold sessions and is useful debug metadata, but exact turn-level retrieval scoring needs turn-span provenance. Current atom provenance is session/segment-level.
+
+Print retrieval metrics from an inference debug file:
+
+```bash
+uv run python lattice/eval/print_retrieval_metrics.py results/run1.debug.jsonl
+```
 
 ### Judge only (inference already done)
 

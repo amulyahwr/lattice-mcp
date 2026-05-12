@@ -258,6 +258,104 @@ def _atom_debug_dict(atom, preview_chars: int | None = None) -> dict:
     }
 
 
+def _atom_session_id(atom: dict) -> str | None:
+    provenance = atom.get("provenance") or {}
+    return provenance.get("session_id") or atom.get("session_id")
+
+
+def _session_retrieval_metrics(item: dict, atoms: list[dict]) -> dict:
+    gold = set(item.get("answer_session_ids") or [])
+    retrieved = [sid for atom in atoms if (sid := _atom_session_id(atom))]
+    retrieved_set = set(retrieved)
+
+    metrics = {
+        "gold_answer_session_ids": sorted(gold),
+        "retrieved_session_ids": retrieved,
+        "retrieved_gold_session_ids": sorted(gold & retrieved_set),
+        "missing_gold_session_ids": sorted(gold - retrieved_set),
+        "session_hit": None,
+        "session_recall": None,
+        "session_precision": None,
+        "session_mrr": None,
+    }
+    if not gold:
+        return metrics
+
+    first_rank = next(
+        (i + 1 for i, session_id in enumerate(retrieved) if session_id in gold),
+        None,
+    )
+    gold_hits = [session_id for session_id in retrieved if session_id in gold]
+    metrics.update(
+        {
+            "session_hit": bool(gold & retrieved_set),
+            "session_recall": len(gold & retrieved_set) / len(gold),
+            "session_precision": len(gold_hits) / len(retrieved) if retrieved else 0.0,
+            "session_mrr": 1 / first_rank if first_rank else 0.0,
+        }
+    )
+    return metrics
+
+
+def _answer_turn_summary(item: dict, preview_chars: int = 240) -> dict:
+    sessions = item.get("haystack_sessions", [])
+    session_ids = item.get(
+        "haystack_session_ids", [f"s{i}" for i in range(len(sessions))]
+    )
+    answer_session_ids = set(item.get("answer_session_ids") or [])
+    counts: dict[str, int] = {}
+    previews: list[dict] = []
+
+    for session, session_id in zip(sessions, session_ids):
+        count = 0
+        for turn_index, turn in enumerate(session):
+            if turn.get("has_answer") is not True:
+                continue
+            count += 1
+            content = str(turn.get("content", ""))
+            previews.append(
+                {
+                    "session_id": session_id,
+                    "turn_index": turn_index,
+                    "role": turn.get("role"),
+                    "content": content[:preview_chars],
+                }
+            )
+        if count:
+            counts[session_id] = count
+
+    return {
+        "answer_session_ids": sorted(answer_session_ids),
+        "answer_turn_counts_by_session": counts,
+        "answer_turns_preview": previews,
+    }
+
+
+def _new_retrieval_totals() -> dict[str, float]:
+    return {"n": 0, "hit": 0, "recall": 0.0, "precision": 0.0, "mrr": 0.0}
+
+
+def _add_retrieval_totals(totals: dict[str, float], metrics: dict) -> None:
+    if metrics.get("session_hit") is None:
+        return
+    totals["n"] += 1
+    totals["hit"] += 1 if metrics["session_hit"] else 0
+    totals["recall"] += float(metrics.get("session_recall") or 0.0)
+    totals["precision"] += float(metrics.get("session_precision") or 0.0)
+    totals["mrr"] += float(metrics.get("session_mrr") or 0.0)
+
+
+def _format_retrieval_totals(name: str, totals: dict[str, float]) -> str:
+    n = int(totals["n"])
+    if not n:
+        return f"  {name:<8}: n=0"
+    return (
+        f"  {name:<8}: n={n} hit={totals['hit'] / n:.1%} "
+        f"recall={totals['recall'] / n:.3f} "
+        f"precision={totals['precision'] / n:.3f} mrr={totals['mrr'] / n:.3f}"
+    )
+
+
 def _valid_as_of(atom, as_of: date | None) -> bool:
     if atom.is_superseded:
         return False
@@ -299,6 +397,8 @@ def _run_inference(cfg: dict) -> None:
 
     n_done = n_err = 0
     atoms_created_total = atoms_selected_total = bm25_candidates_total = 0
+    bm25_retrieval_totals = _new_retrieval_totals()
+    selected_retrieval_totals = _new_retrieval_totals()
 
     with (
         out_path.open("a") as out_f,
@@ -406,6 +506,12 @@ def _run_inference(cfg: dict) -> None:
                         if _valid_as_of(atom, as_of)
                     ]
 
+                answer_oracle = _answer_turn_summary(item)
+                retrieval_oracle = {
+                    "bm25": _session_retrieval_metrics(item, bm25_candidates),
+                    "selected": _session_retrieval_metrics(item, selected),
+                }
+
                 synthesis = synthesize(item["question"], selected)
 
                 all_atoms = [_atom_debug_dict(a, preview_chars=240) for a in db.all()]
@@ -436,6 +542,8 @@ def _run_inference(cfg: dict) -> None:
                             "atoms_created": atoms_created,
                             "duplicates_skipped": duplicates_skipped,
                             "atoms": all_atoms,
+                            "answer_oracle": answer_oracle,
+                            "retrieval_oracle": retrieval_oracle,
                             "bm25_candidates": bm25_candidates,
                             "bm25_candidate_ids": [
                                 atom["atom_id"] for atom in bm25_candidates
@@ -453,6 +561,12 @@ def _run_inference(cfg: dict) -> None:
                 atoms_created_total += atoms_created
                 atoms_selected_total += len(selected)
                 bm25_candidates_total += len(bm25_candidates)
+                _add_retrieval_totals(
+                    bm25_retrieval_totals, retrieval_oracle["bm25"]
+                )
+                _add_retrieval_totals(
+                    selected_retrieval_totals, retrieval_oracle["selected"]
+                )
                 n_done += 1
 
             except Exception as exc:
@@ -479,6 +593,9 @@ def _run_inference(cfg: dict) -> None:
         print(f"  Avg atoms created  : {atoms_created_total / n_done:.1f}")
         print(f"  Avg BM25 candidates: {bm25_candidates_total / n_done:.1f}")
         print(f"  Avg atoms selected : {atoms_selected_total / n_done:.1f}")
+        print("  Session oracle:")
+        print(_format_retrieval_totals("BM25", bm25_retrieval_totals))
+        print(_format_retrieval_totals("Selected", selected_retrieval_totals))
     print(f"  Results   : {out_path}")
     print(f"  Debug     : {debug_path}")
     if cfg["keep_lattice_dirs"] and not reuse_lattice_root:
