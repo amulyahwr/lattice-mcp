@@ -55,8 +55,20 @@ def select(
     if db is None:
         db = LatticeDB()
 
-    candidates = db.search(query, as_of=as_of, top_k=top_k)
-    if not candidates:
+    seeds = db.search(query, as_of=as_of, top_k=top_k)
+    if not seeds:
         return []
 
-    return [_atom_to_dict(a) for a in candidates]
+    selected = []
+    seen: set[str] = set()
+    max_atoms = max(top_k, top_k * 3)
+    for seed in seeds:
+        for atom in db.evidence_pack(seed, as_of=as_of):
+            if atom.atom_id in seen:
+                continue
+            selected.append(atom)
+            seen.add(atom.atom_id)
+            if len(selected) >= max_atoms:
+                return [_atom_to_dict(a) for a in selected]
+
+    return [_atom_to_dict(a) for a in selected]

@@ -24,6 +24,10 @@ def _query_words(text: str) -> list[str]:
     return [w for w in re.findall(r"[a-z0-9]{3,}", text.lower()) if w not in _STOPWORDS]
 
 
+def _normalized_subject(subject: str) -> str:
+    return " ".join(re.findall(r"[a-z0-9]+", subject.lower()))
+
+
 class AtomNotFound(Exception):
     pass
 
@@ -165,15 +169,18 @@ class LatticeDB:
         new_atom.supersedes = old_id
         self.write(new_atom)
 
-    # ── search ────────────────────────────────────────────────────────────
+    # ── retrieval packs ──────────────────────────────────────────────────
 
-    def search(
+    def _valid_atoms(
         self,
-        query: str,
         as_of: date | None = None,
-        top_k: int = 20,
+        include_superseded: bool = False,
     ) -> list[Atom]:
-        atoms = [a for a in self.all() if not a.is_superseded]
+        atoms = (
+            self.all()
+            if include_superseded
+            else [a for a in self.all() if not a.is_superseded]
+        )
 
         if as_of is not None:
             atoms = [
@@ -182,6 +189,132 @@ class LatticeDB:
                 if (a.valid_from is None or a.valid_from <= as_of)
                 and (a.valid_until is None or a.valid_until >= as_of)
             ]
+
+        return atoms
+
+    @staticmethod
+    def _source_order_key(atom: Atom) -> tuple:
+        span = atom.source_span or {}
+        return (
+            atom.observed_at.isoformat() if atom.observed_at else "",
+            atom.source_id or "",
+            atom.session_id or "",
+            atom.segment_id or "",
+            span.get("start", -1),
+            span.get("end", -1),
+            atom.atom_id,
+        )
+
+    @staticmethod
+    def _add_unique(target: list[Atom], seen: set[str], atoms: list[Atom]) -> None:
+        for atom in atoms:
+            if atom.atom_id in seen:
+                continue
+            target.append(atom)
+            seen.add(atom.atom_id)
+
+    def evidence_pack(
+        self,
+        seed: Atom,
+        as_of: date | None = None,
+        nearby_window: int = 2,
+        subject_limit: int = 6,
+    ) -> list[Atom]:
+        """Expand a BM25 seed into deterministic local evidence.
+
+        This stays file-local: no graph sidecar required. It uses provenance
+        already stored on atoms to recover source/segment context.
+        """
+        atoms = self._valid_atoms(as_of=as_of, include_superseded=True)
+        by_id = {atom.atom_id: atom for atom in atoms}
+        pack: list[Atom] = []
+        seen: set[str] = set()
+
+        seed = by_id.get(seed.atom_id, seed)
+        self._add_unique(pack, seen, [seed])
+
+        if seed.segment_id:
+            same_segment = [
+                atom for atom in atoms
+                if atom.atom_id != seed.atom_id
+                and atom.segment_id == seed.segment_id
+                and (
+                    (seed.source_id and atom.source_id == seed.source_id)
+                    or (seed.session_id and atom.session_id == seed.session_id)
+                    or (not seed.source_id and not seed.session_id)
+                )
+            ]
+            self._add_unique(
+                pack,
+                seen,
+                sorted(same_segment, key=self._source_order_key),
+            )
+
+        same_source = [
+            atom for atom in atoms
+            if atom.atom_id != seed.atom_id
+            and (
+                (seed.source_id and atom.source_id == seed.source_id)
+                or (seed.session_id and atom.session_id == seed.session_id)
+            )
+        ]
+        same_source_sorted = sorted(
+            same_source + [seed],
+            key=self._source_order_key,
+        )
+        seed_index = next(
+            (
+                i for i, atom in enumerate(same_source_sorted)
+                if atom.atom_id == seed.atom_id
+            ),
+            -1,
+        )
+        if seed_index >= 0:
+            start = max(0, seed_index - nearby_window)
+            end = min(len(same_source_sorted), seed_index + nearby_window + 1)
+            nearby = [
+                atom for atom in same_source_sorted[start:end]
+                if atom.atom_id != seed.atom_id
+            ]
+            self._add_unique(pack, seen, nearby)
+
+        normalized = _normalized_subject(seed.subject)
+        if normalized:
+            same_subject = [
+                atom for atom in atoms
+                if atom.atom_id != seed.atom_id
+                and _normalized_subject(atom.subject) == normalized
+            ]
+            self._add_unique(
+                pack,
+                seen,
+                sorted(same_subject, key=self._source_order_key)[:subject_limit],
+            )
+
+        linked_ids = {
+            atom_id for atom_id in (seed.supersedes, seed.superseded_by) if atom_id
+        }
+        linked_ids.update(
+            atom.atom_id for atom in atoms
+            if atom.supersedes == seed.atom_id or atom.superseded_by == seed.atom_id
+        )
+        linked = [
+            by_id[atom_id] for atom_id in sorted(linked_ids)
+            if atom_id in by_id
+        ]
+        self._add_unique(pack, seen, linked)
+
+        return pack
+
+    # ── search ────────────────────────────────────────────────────────────
+
+    def search(
+        self,
+        query: str,
+        as_of: date | None = None,
+        top_k: int = 20,
+    ) -> list[Atom]:
+        atoms = self._valid_atoms(as_of=as_of)
 
         if not atoms:
             return []

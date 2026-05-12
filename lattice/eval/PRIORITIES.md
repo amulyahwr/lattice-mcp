@@ -18,7 +18,7 @@ Product constraints:
 | P2 ⏭️ | `llm.py`, `selection.py` | **Selection tool calling + fallback**: extend `complete()` with `tools` / `tool_choice`; replace bulk JSON selection with `include_atom(atom_id, reason)` calls; if the model selects nothing, fall back to top BM25 candidates. | Skipped for now by product direction; still useful before or during graph-seeded selection. |
 | P3 ✅ | `models.py`, `ingest.py`, `selection.py`, `synthesis.py` | **Source-aware ingest + provenance + exact dedup**: add `ingested_at`, optional `observed_at`, `source_id`, `source_title`, `session_id`, `segment_id`, `source_type`, `source_span`, `content_hash`, and `normalized_content_hash`. Segment by source type: Markdown headings, chat turns/windows, code/docs symbols or sections, plain text overlapped windows. Commit each source independently and skip/mark exact duplicates before write. | Done — atoms now carry provenance/hash fields, ingest segments sources with bounded workers, exact duplicates are skipped, and selection/synthesis expose provenance. |
 | P3.5 ✅ | `lattice/eval/run_eval.py`, `lattice/eval/run_parallel_eval.py`, `lattice/eval/debug_viewer.py`, `lattice/eval/print_retrieval_metrics.py`, `selection.py` | **Retrieval oracle diagnostics + selected payload normalization**: use LongMemEval `answer_session_ids` to report session hit/recall/precision/MRR for BM25 candidates and selected atoms; expose `has_answer` answer-turn previews for debugging; make `select` return the same provenance/dedup/supersession payload shape as BM25 debug atoms. | Done — removes a select-vs-BM25 payload-shape confound before P4 and gives retrieval metrics that can separate recall failures from synthesis failures. |
-| P4 | `selection.py`, `db.py` | **Pack retrieval over BM25 seeds**: keep BM25 as the recall path, but make selection return evidence packs instead of isolated atom picks. For each top seed atom, deterministically expand to same `segment_id`, nearby atoms in the same `source_id` / `session_id`, same normalized subject, and supersession/update neighbors when available. Flatten packs with de-duplication and stable ordering; do not use an LLM as a hard selector. | Bridges flat BM25 and full graph traversal with a product-native retrieval unit. Improves multi-atom, temporal, and update questions without introducing fragile weighted scoring or local-model filtering. |
+| P4 ✅ | `selection.py`, `db.py` | **Pack retrieval over BM25 seeds**: keep BM25 as the recall path, but make selection return evidence packs instead of isolated atom picks. For each top seed atom, deterministically expand to same `segment_id`, nearby atoms in the same `source_id` / `session_id`, same normalized subject, and supersession/update neighbors when available. Flatten packs with de-duplication and stable ordering; do not use an LLM as a hard selector. | Done — improved 100q LongMemEval from P3.5 select 13.0% / BM25 15.0% to 18.0% overall and 20.19% task-avg. Avg selected atoms rose from 17.1 to 31.1; selected session hit stayed 100%, recall dipped slightly to 0.986. |
 | P5 | `graph.py`, `db.py`, `ingest.py` | **Incremental heterogeneous graph index**: add a local NetworkX-style `MultiDiGraph` compute layer backed by portable sidecars: `nodes.jsonl`, `edges.jsonl`, `sources.json`, `graph/manifest.json`. Deterministic nodes/edges: `atom:<id>`, `source:<id>`, `segment:<id>`, `subject:<normalized>`, `source_contains_segment`, `segment_contains_atom`, `atom_has_subject`, `same_subject_as`, `same_hash`, `supersedes` / `updates`. Use atomic writes, graph versions, and cache reload only when the manifest changes. | Turns a flat atom folder into a real lattice while preserving local, file-based storage. |
 | P6 | `selection.py`, `graph.py`, `db.py` | **Graph-seeded selection over committed snapshots**: selection reads the latest committed graph/BM25 snapshot and never waits for active ingest. BM25 seeds atoms/subjects/sources, then bounded BFS expands evidence packs through source/segment/subject/update edges. Collapse duplicate/supersession groups before synthesis; keep any LLM scoring optional and non-authoritative. | Generalizes pack retrieval onto the graph, improves relevance and latency, reduces duplicate context waste, and enables query-while-ingest. |
 | P7 | `ingest.py`, `server.py`, `db.py` | **Local ingest jobs + status UX**: keep simple `lattice_ingest` for small sync inputs. Add persistent status for batch/background ingest: `job_id`, indexed/active/failed source counts, enrichment pending, `graph_version`, `last_commit_at`. If MCP client concurrency works well, expose `lattice_ingest_start` and `lattice_ingest_status`; otherwise keep status internal/debug. | Local users need to know what has been indexed and should be able to query committed memory without waiting for a large ingest to finish. |
@@ -81,18 +81,20 @@ Evaluation method:
 | p4 | HyDE expansion | skipped | BM25 + hallucinated vocabulary produced wrong retrieval; better suited for dense retrieval. |
 | p5 | Generated questions per atom | 16.0% | Generated questions polluted BM25 with false-positive matches. Reverted. |
 | p6 | Adaptive paragraph chunking | 22.0% | Helped some user-fact extraction but hurt cross-paragraph/coreference cases. Keep only as motivation for source-aware segmentation. |
-| p3.5 | Retrieval oracle + selected payload normalization | pending | Added session hit/recall/precision/MRR diagnostics from `answer_session_ids`, exposed `has_answer` previews, and normalized `select` payload shape before P4. Rerun select vs BM25 to verify the payload-shape confound is gone. |
+| p3.5-select | Retrieval oracle + selected payload normalization | 13.0% | Verified select/BM25 payload-shape confound cleared on reused P3 lattices. Retrieval metrics matched BM25 exactly: selected hit 100%, recall 1.000, precision 1.000, MRR 1.000. Task-avg 15.03%. |
+| p3.5-bm25 | BM25 ablation on normalized payload | 15.0% | Same reused P3 lattices and current diagnostics. BM25 hit 100%, recall 1.000, precision 1.000, MRR 1.000. Task-avg 17.51%. |
+| p4-pack | Pack retrieval over BM25 seeds | 18.0% | Product-fit keeper. Avg selected atoms rose from 17.1 to 31.1. Selected hit 100%, recall 0.986, precision 1.000, MRR 1.000. Task-avg 20.19%. |
 
 ## Category Tracker
 
-| Category | baseline | p1 | p2 | p3 | p5 | p6 |
-| --- | --- | --- | --- | --- | --- | --- |
-| overall | 15.0% | 23.8% | 19.0% | 18.0% | 16.0% | 22.0% |
-| task-avg | - | 25.2% | 23.1% | 20.1% | 18.2% | - |
-| single-session-user | - | 35.7% | 42.9% | 35.7% | 14.3% | 42.9% |
-| single-session-preference | - | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% |
-| single-session-assistant | - | 54.5% | 54.5% | 36.4% | 54.5% | 36.4% |
-| multi-session | - | 22.2% | 3.7% | 11.1% | 7.4% | 14.8% |
-| temporal-reasoning | - | 7.4% | 0.0% | 0.0% | 7.7% | 7.7% |
-| knowledge-update | - | 31.3% | 37.5% | 37.5% | 25.0% | 37.5% |
-| abstention | - | 28.6% | 0.0% | 28.6% | 42.9% | - |
+| Category | baseline | p1 | p2 | p3 | p5 | p6 | p3.5-select | p3.5-bm25 | p4-pack |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| overall | 15.0% | 23.8% | 19.0% | 18.0% | 16.0% | 22.0% | 13.0% | 15.0% | 18.0% |
+| task-avg | - | 25.2% | 23.1% | 20.1% | 18.2% | - | 15.03% | 17.51% | 20.19% |
+| single-session-user | - | 35.7% | 42.9% | 35.7% | 14.3% | 42.9% | 21.4% | 42.9% | 35.7% |
+| single-session-preference | - | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% |
+| single-session-assistant | - | 54.5% | 54.5% | 36.4% | 54.5% | 36.4% | 36.4% | 27.3% | 45.5% |
+| multi-session | - | 22.2% | 3.7% | 11.1% | 7.4% | 14.8% | 7.4% | 3.7% | 11.1% |
+| temporal-reasoning | - | 7.4% | 0.0% | 0.0% | 7.7% | 7.7% | 0.0% | 0.0% | 3.85% |
+| knowledge-update | - | 31.3% | 37.5% | 37.5% | 25.0% | 37.5% | 25.0% | 31.3% | 25.0% |
+| abstention | - | 28.6% | 0.0% | 28.6% | 42.9% | - | 42.9% | 57.1% | 42.9% |

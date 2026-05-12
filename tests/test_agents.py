@@ -205,15 +205,12 @@ class TestSelect:
     def test_returns_relevant_atoms(self, db):
         atoms = self._seed(db)
         python_id = atoms[0].atom_id
-        with patch("lattice.selection.complete", return_value=_select_response([python_id])):
-            result = select("tell me about Python", db=db)
-        assert len(result) == 1
+        result = select("tell me about Python", db=db)
         assert result[0]["atom_id"] == python_id
 
     def test_result_has_required_fields(self, db):
         atoms = self._seed(db)
-        with patch("lattice.selection.complete", return_value=_select_response([atoms[0].atom_id])):
-            result = select("Python", db=db)
+        result = select("Python", db=db)
         keys = set(result[0].keys())
         assert {"atom_id", "subject", "content", "kind", "source"}.issubset(keys)
         assert {"source_id", "source_title", "segment_id", "observed_at"}.issubset(keys)
@@ -222,12 +219,11 @@ class TestSelect:
         result = select("anything", db=db)
         assert result == []
 
-    def test_llm_garbage_falls_back_to_bm25(self, db):
+    def test_uses_bm25_without_llm_selector(self, db):
         self._seed(db)
-        with patch("lattice.selection.complete", return_value="not valid json {{{}"):
-            result = select("programming language", db=db)
-        # Should still return something (BM25 fallback)
+        result = select("programming language", db=db)
         assert isinstance(result, list)
+        assert result
 
     def test_as_of_filters_before_llm(self, db):
         from lattice.models import Atom
@@ -236,11 +232,29 @@ class TestSelect:
             content="Price is $10.", valid_until=date(2023, 12, 31),
         )
         db.write(expired)
-        # Even if LLM returns the expired id, it shouldn't be in BM25 candidates
-        with patch("lattice.selection.complete", return_value=_select_response([expired.atom_id])):
-            result = select("price", as_of=date(2024, 6, 1), db=db)
-        # expired atom was filtered from BM25 candidates, so not in result
+        result = select("price", as_of=date(2024, 6, 1), db=db)
         assert all(r["atom_id"] != expired.atom_id for r in result)
+
+    def test_expands_same_segment_pack(self, db):
+        from lattice.models import Atom
+        seed = Atom(
+            kind="fact", source="user", subject="Python",
+            content="Python supports decorators.",
+            source_id="src-1", session_id="sess-1", segment_id="seg-1",
+            source_span={"start": 100, "end": 130},
+        )
+        sibling = Atom(
+            kind="fact", source="user", subject="Python testing",
+            content="Pytest fixtures help test Python code.",
+            source_id="src-1", session_id="sess-1", segment_id="seg-1",
+            source_span={"start": 131, "end": 180},
+        )
+        db.write(seed)
+        db.write(sibling)
+
+        result = select("decorators", db=db, top_k=1)
+        ids = [row["atom_id"] for row in result]
+        assert ids[:2] == [seed.atom_id, sibling.atom_id]
 
 
 # ── synthesis ─────────────────────────────────────────────────────────────────

@@ -132,6 +132,39 @@ class TestSearch:
         assert len(results) <= 3
 
 
+class TestEvidencePack:
+    def test_pack_includes_nearby_source_atoms(self, db):
+        atoms = []
+        for i in range(5):
+            atom = make_atom(
+                subject=f"Trip {i}",
+                content=f"Trip detail {i}.",
+                source_id="src-1",
+                session_id="sess-1",
+                segment_id=f"seg-{i}",
+                source_span={"start": i * 10, "end": i * 10 + 9},
+            )
+            db.write(atom)
+            atoms.append(atom)
+
+        pack = db.evidence_pack(atoms[2], nearby_window=1)
+        ids = [atom.atom_id for atom in pack]
+
+        assert ids[:3] == [atoms[2].atom_id, atoms[1].atom_id, atoms[3].atom_id]
+
+    def test_pack_includes_supersession_neighbor(self, db):
+        old = make_atom(subject="Status", content="Status is draft.")
+        db.write(old)
+        new = make_atom(subject="Status", content="Status is final.")
+        db.supersede(old.atom_id, new)
+
+        pack = db.evidence_pack(db.read(new.atom_id))
+        ids = [atom.atom_id for atom in pack]
+
+        assert ids[0] == new.atom_id
+        assert old.atom_id in ids
+
+
 class TestAsOf:
     def test_as_of_excludes_expired_atom(self, db):
         expired = make_atom(
