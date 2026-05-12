@@ -88,7 +88,9 @@ def _default_out(
 ) -> str:
     """Inference output path. Always named by llm_slug only — judge slug appears in eval-results filename."""
     ds = Path(dataset).stem
-    suffix = "_inference" if retrieval_mode == "select" else f"_{retrieval_mode}_inference"
+    suffix = (
+        "_inference" if retrieval_mode == "select" else f"_{retrieval_mode}_inference"
+    )
     return f"{_results_dir(priority)}/{_slug(llm_model)}_{ds}{suffix}.jsonl"
 
 
@@ -132,7 +134,7 @@ class _Tee:
 
 def _load_config(args: argparse.Namespace) -> dict:
     load_dotenv(".env.eval", override=False)
-    model = os.environ.get("LLM_MODEL", "gemma4:e2b")
+    model = os.environ.get("LLM_MODEL", "gemma4:e4b")
     judge = os.environ.get("JUDGE_MODEL", "qwen3.5:4b")
     dataset = args.dataset or os.environ.get("DATASET", _DEFAULT_DATASET)
     phase = args.phase
@@ -143,7 +145,9 @@ def _load_config(args: argparse.Namespace) -> dict:
     cfg = {
         "dataset": dataset,
         "out": args.out
-        or os.environ.get("OUT", _default_out(model, dataset, priority, retrieval_mode)),
+        or os.environ.get(
+            "OUT", _default_out(model, dataset, priority, retrieval_mode)
+        ),
         "log": args.log
         or os.environ.get(
             "LOG", _default_log(model, judge, dataset, phase, priority, retrieval_mode)
@@ -268,7 +272,9 @@ def _run_inference(cfg: dict) -> None:
     out_path = Path(cfg["out"])
     debug_path = out_path.with_suffix("").with_name(out_path.stem + ".debug.jsonl")
     lattice_root = out_path.with_suffix("").with_name(out_path.stem + ".lattices")
-    reuse_lattice_root = Path(cfg["reuse_lattice_root"]) if cfg["reuse_lattice_root"] else None
+    reuse_lattice_root = (
+        Path(cfg["reuse_lattice_root"]) if cfg["reuse_lattice_root"] else None
+    )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if cfg["keep_lattice_dirs"]:
         lattice_root.mkdir(parents=True, exist_ok=True)
@@ -310,7 +316,9 @@ def _run_inference(cfg: dict) -> None:
             if reuse_lattice_root:
                 tmpdir = str(reuse_lattice_root / qid)
                 if not Path(tmpdir).exists():
-                    raise FileNotFoundError(f"missing reused lattice dir for {qid}: {tmpdir}")
+                    raise FileNotFoundError(
+                        f"missing reused lattice dir for {qid}: {tmpdir}"
+                    )
             elif cfg["keep_lattice_dirs"]:
                 tmpdir = str(lattice_root / qid)
                 shutil.rmtree(tmpdir, ignore_errors=True)
@@ -339,7 +347,11 @@ def _run_inference(cfg: dict) -> None:
                         text = format_session(session, sid, ts)
                         ingest_result = ingest(
                             text,
-                            metadata={"source": "conversation", "date": ts, "session_id": sid},
+                            metadata={
+                                "source": "conversation",
+                                "date": ts,
+                                "session_id": sid,
+                            },
                             db=db,
                         )
                         atoms_created += ingest_result["atoms_created"]
@@ -349,11 +361,17 @@ def _run_inference(cfg: dict) -> None:
                                 "session_id": sid,
                                 "date": ts,
                                 "source_id": ingest_result.get("source_id"),
-                                "segments_processed": ingest_result.get("segments_processed"),
+                                "segments_processed": ingest_result.get(
+                                    "segments_processed"
+                                ),
                                 "atoms_created": ingest_result.get("atoms_created"),
                                 "atom_ids": ingest_result.get("atom_ids", []),
-                                "duplicates_skipped": ingest_result.get("duplicates_skipped", 0),
-                                "duplicate_atom_ids": ingest_result.get("duplicate_atom_ids", []),
+                                "duplicates_skipped": ingest_result.get(
+                                    "duplicates_skipped", 0
+                                ),
+                                "duplicate_atom_ids": ingest_result.get(
+                                    "duplicate_atom_ids", []
+                                ),
                             }
                         )
 
@@ -390,10 +408,7 @@ def _run_inference(cfg: dict) -> None:
 
                 synthesis = synthesize(item["question"], selected)
 
-                all_atoms = [
-                    _atom_debug_dict(a, preview_chars=240)
-                    for a in db.all()
-                ]
+                all_atoms = [_atom_debug_dict(a, preview_chars=240) for a in db.all()]
 
                 out_f.write(
                     json.dumps({"question_id": qid, "hypothesis": synthesis.answer})
@@ -407,9 +422,13 @@ def _run_inference(cfg: dict) -> None:
                             "question_id": qid,
                             "question_type": qtype,
                             "lattice_dir": tmpdir,
-                            "lattice_dir_kept": bool(cfg["keep_lattice_dirs"] or reuse_lattice_root),
+                            "lattice_dir_kept": bool(
+                                cfg["keep_lattice_dirs"] or reuse_lattice_root
+                            ),
                             "atoms_reused": bool(reuse_lattice_root),
-                            "reuse_lattice_root": str(reuse_lattice_root) if reuse_lattice_root else None,
+                            "reuse_lattice_root": (
+                                str(reuse_lattice_root) if reuse_lattice_root else None
+                            ),
                             "sessions_ingested": len(sessions),
                             "retrieval_mode": cfg["retrieval_mode"],
                             "top_k": cfg["top_k"],
@@ -527,7 +546,7 @@ def _run_judge(cfg: dict) -> None:
         print("\n── Scoring summary ────────────────────────────────────────────")
         for script, args in [
             (cfg["print_qa_script"], [result_file, cfg["dataset"]]),
-            (cfg["print_retrieval_script"], [result_file]),
+            # (cfg["print_retrieval_script"], [result_file]),
         ]:
             if script:
                 out = subprocess.run(
@@ -570,7 +589,9 @@ def _parse_args() -> argparse.Namespace:
             "bm25=bypass LLM selection, all=bypass retrieval."
         ),
     )
-    p.add_argument("--top-k", type=int, default=0, help="Candidate count for BM25/select")
+    p.add_argument(
+        "--top-k", type=int, default=0, help="Candidate count for BM25/select"
+    )
     p.add_argument("--evaluate-script", default="")
     p.add_argument("--print-qa-script", default="")
     p.add_argument("--print-retrieval-script", default="")
